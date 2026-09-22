@@ -1,0 +1,55 @@
+{
+  "version": 1,
+
+  "targets": {
+    "frank2673.github.io": {
+      "note": "个人主页。当前托管于 GitHub Pages —— 该平台不支持自定义响应头，因此本策略需要由前置的 Cloudflare Pages / Netlify 代理层执行（免费套餐即可，无需自有域名）。迁移步骤见 MIGRATION.md。"
+    }
+  },
+
+  "headers": {
+    "Strict-Transport-Security": {
+      "value": "max-age=31536000; includeSubDomains",
+      "severity": "medium",
+      "why": "强制浏览器此后只用 HTTPS 访问，抵御 SSL 剥离与降级劫持；includeSubDomains 防止攻击者从子域绕过。"
+    },
+
+    "Content-Security-Policy": {
+      "value": "default-src 'self'; script-src 'self' 'sha256-ab1dsL2WBfLFbNhNPNbdT9zQ5o8/OlH88pYN4AqLL9k='; style-src 'self'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests",
+      "severity": "medium",
+      "why": "限制脚本与资源的加载来源，作为 XSS 的第二道防线。内联的防闪烁主题脚本用 sha256 hash 放行（而非 unsafe-inline），因此修改该脚本后必须重新生成 hash —— 用 `node src/index.mjs advise --html <index.html> --check headers.policy.json` 可检测漂移。"
+    },
+
+    "X-Content-Type-Options": {
+      "value": "nosniff",
+      "severity": "low",
+      "why": "禁止浏览器按内容猜测 MIME 类型，避免把上传/静态文件当作脚本执行。"
+    },
+
+    "Referrer-Policy": {
+      "value": "strict-origin-when-cross-origin",
+      "severity": "low",
+      "why": "跨站跳转时只发送来源域而不带完整路径，避免 URL 中的信息被第三方日志记录。"
+    },
+
+    "Permissions-Policy": {
+      "value": "geolocation=(), camera=(), microphone=(), payment=(), usb=(), magnetometer=(), gyroscope=()",
+      "severity": "info",
+      "why": "本站不需要任何浏览器硬件能力，显式关闭可缩小被注入脚本后的可利用面。"
+    },
+
+    "X-Frame-Options": {
+      "value": "DENY",
+      "severity": "medium",
+      "why": "禁止页面被 iframe 嵌套，防止点击劫持。与 CSP 的 frame-ancestors 形成双保险（覆盖老浏览器）。"
+    },
+
+    "Cross-Origin-Opener-Policy": {
+      "value": "same-origin",
+      "severity": "low",
+      "why": "把本站的浏览器上下文与外部窗口隔离，缓解 Spectre 类侧信道与窗口引用滥用。"
+    }
+  },
+
+  "remove": ["X-Powered-By", "Server"]
+}

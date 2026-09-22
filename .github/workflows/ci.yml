@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ========== 单元测试（全部离线） ==========
+  test:
+    name: 单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 运行测试套件
+        run: node --test tests/
+
+      - name: 零依赖校验
+        run: node scripts/check-zero-deps.mjs
+
+  # ========== 完整闭环：策略 → 生成 → 本地自证 ==========
+  pipeline:
+    name: 生成与自证闭环
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 用策略生成五平台配置
+        run: node src/index.mjs generate --policy headers.policy.json --out dist
+
+      - name: 产物齐全性检查
+        run: |
+          for f in dist/_headers dist/vercel.json dist/nginx/nginx-security-headers.conf dist/caddy/Caddyfile.headers dist/manifest.json; do
+            if [ ! -f "$f" ]; then echo "❌ 缺少产物：$f"; exit 1; fi
+          done
+          echo "✅ 五份产物 + 清单齐全"
+
+      - name: 生成结果可复现（重复生成必须完全一致）
+        run: |
+          node src/index.mjs generate --policy headers.policy.json --out dist2 > /dev/null
+          for f in dist/_headers dist/vercel.json dist/nginx/nginx-security-headers.conf dist/caddy/Caddyfile.headers; do
+            g=$(echo "$f" | sed 's|^dist/|dist2/|')
+            if ! diff -q "$f" "$g" > /dev/null; then
+              echo "❌ 产物不确定：$f 与 $g 不一致"
+              diff "$f" "$g" | head -20
+              exit 1
+            fi
+          done
+          echo "✅ 生成结果确定可复现"
+
+      - name: 本地模拟自证（生成的配置必须满足策略）
+        run: node src/index.mjs simulate --config dist/_headers --policy headers.policy.json
+
+      - name: CSP hash 漂移检测必须通过（夹具页面与夹具策略一致）
+        run: node src/index.mjs advise --html fixtures/site.html --check fixtures/site.policy.json
+
+      - name: 漂移检测必须能发现真实改动（负向验证）
+        run: |
+          # 故意改动内联脚本内容，hash 应当失配
+          sed 's/var theme = localStorage.getItem/var theme = "light" || localStorage.getItem/' \
+            fixtures/site.html > /tmp/mutated.html
+
+          set +e
+          node src/index.mjs advise --html /tmp/mutated.html --check fixtures/site.policy.json > /tmp/drift.log 2>&1
+          code=$?
+          set -e
+          cat /tmp/drift.log
+
+          if [ "$code" -ne 1 ]; then
+            echo "❌ 内联脚本已改动，漂移检测却未报错（退出码 $code）—— 检测可能失效"
+            exit 1
+          fi
+          echo "✅ 漂移检测正确发现了改动"
+
+      - name: 上传生成的配置
+        uses: actions/upload-artifact@v4
+        with:
+          name: header-configs
+          path: dist/
+          retention-days: 30
+
+  # ========== 策略守卫：弱策略必须被拒绝 ==========
+  policy-guard:
+    name: 策略质量守卫
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 生成四种「坏策略」用于负向验证
+        run: node scripts/make-bad-policies.mjs /tmp/bad
+
+      - name: 含 unsafe-inline 的 CSP 必须被拒绝
+        run: |
+          set +e
+          node src/index.mjs generate --policy /tmp/bad/weak.policy.json --out /tmp/x > /tmp/weak.log 2>&1
+          code=$?
+          set -e
+          cat /tmp/weak.log
+          grep -q "unsafe-inline" /tmp/weak.log || { echo "❌ 报错信息未指出 unsafe-inline"; exit 1; }
+          if [ "$code" -ne 2 ]; then echo "❌ 期望退出码 2，实际 $code"; exit 1; fi
+          echo "✅ 弱策略被正确拒绝，且报错指向具体原因"
+
+      - name: 含换行的策略值（配置注入）必须被拒绝
+        run: |
+          set +e
+          node src/index.mjs generate --policy /tmp/bad/inject.policy.json --out /tmp/x > /tmp/inject.log 2>&1
+          code=$?
+          set -e
+          cat /tmp/inject.log
+          grep -q "会被注入进生成的配置语法" /tmp/inject.log || { echo "❌ 报错信息未指出注入风险"; exit 1; }
+          if [ "$code" -ne 2 ]; then echo "❌ 期望退出码 2，实际 $code"; exit 1; fi
+          echo "✅ 配置注入被正确拒绝，且报错指向具体原因"
+
+      - name: 缺少安全基线的策略必须被拒绝
+        run: |
+          set +e
+          node src/index.mjs generate --policy /tmp/bad/nocsp.policy.json --out /tmp/x > /tmp/nocsp.log 2>&1
+          code=$?
+          set -e
+          cat /tmp/nocsp.log
+          grep -q "缺少安全基线要求的响应头：Content-Security-Policy" /tmp/nocsp.log || { echo "❌ 未指出缺少 CSP"; exit 1; }
+          if [ "$code" -ne 2 ]; then echo "❌ 期望退出码 2，实际 $code"; exit 1; fi
+          echo "✅ 缺少安全基线被正确拒绝"
+
+      - name: HSTS max-age 过短必须被拒绝
+        run: |
+          set +e
+          node src/index.mjs generate --policy /tmp/bad/weakhsts.policy.json --out /tmp/x > /tmp/weakhsts.log 2>&1
+          code=$?
+          set -e
+          cat /tmp/weakhsts.log
+          grep -q "max-age 过短" /tmp/weakhsts.log || { echo "❌ 未指出 max-age 过短"; exit 1; }
+          if [ "$code" -ne 2 ]; then echo "❌ 期望退出码 2，实际 $code"; exit 1; fi
+          echo "✅ 过短 HSTS 被正确拒绝"

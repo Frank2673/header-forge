@@ -1,0 +1,11 @@
+# 仓库内统一使用 LF（CI 在 Linux 上执行脚本）
+* text=auto eol=lf
+
+# 二进制文件不做转换
+*.png binary
+*.jpg binary
+*.ico binary
+
+*.mjs text eol=lf
+*.yml text eol=lf
+*.json text eol=lf

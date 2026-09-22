@@ -1,0 +1,31 @@
+{
+  "name": "header-forge",
+  "version": "0.1.0",
+  "description": "安全响应头配置即代码 —— 一次声明，多平台生成，线上校验，本地可证",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "header-forge": "src/index.mjs"
+  },
+  "scripts": {
+    "generate": "node src/index.mjs generate --policy headers.policy.json --out dist",
+    "verify": "node src/index.mjs verify --policy headers.policy.json",
+    "advise": "node src/index.mjs advise --url https://frank2673.github.io/",
+    "simulate": "node src/index.mjs simulate --config dist/_headers",
+    "test": "node --test tests/"
+  },
+  "keywords": [
+    "security-headers",
+    "csp",
+    "configuration-as-code",
+    "cloudflare-pages",
+    "netlify",
+    "nginx"
+  ],
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {}
+}

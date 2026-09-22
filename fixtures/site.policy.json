@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "targets": {
+    "fixture.local": { "note": "CI 夹具，不对应任何真实站点" }
+  },
+  "headers": {
+    "Strict-Transport-Security": {
+      "value": "max-age=31536000; includeSubDomains",
+      "severity": "medium",
+      "why": "夹具用"
+    },
+    "Content-Security-Policy": {
+      "value": "default-src 'self'; script-src 'self' 'sha256-kFZ/nhreIbCbgkNPT8BPL5Nj5SDwRcJPLg3y6+ynvVk='; style-src 'self'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests",
+      "severity": "medium",
+      "why": "夹具用：此 hash 对应 fixtures/site.html 中的内联脚本，用于验证漂移检测"
+    },
+    "X-Content-Type-Options": { "value": "nosniff", "severity": "low", "why": "夹具用" },
+    "Referrer-Policy": { "value": "strict-origin-when-cross-origin", "severity": "low", "why": "夹具用" }
+  }
+}
