@@ -1,8 +1,11 @@
 // 生成三种"坏策略"用于负向验证（放在仓库外，不污染仓库）
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 
 const base = JSON.parse(readFileSync('headers.policy.json', 'utf8'));
-const outDir = process.argv[2];
+const outDir = process.argv[2] || 'tmp/bad-policies';
+
+/* 目录可能不存在（CI 上就是如此）—— 必须自己建，否则首次运行直接崩 */
+mkdirSync(outDir, { recursive: true });
 
 /* 1. script-src 放行 unsafe-inline */
 const weak = structuredClone(base);
