@@ -1,0 +1,104 @@
+name: 线上一致性监控
+
+# 这是"防回退"防线：
+#   配置写了不等于一直生效。若某天有人改了 Cloudflare 设置、换了托管平台、
+#   或 _headers 没被正确部署，安全响应头会静默消失 —— 这个工作流每周检查一次，
+#   一旦与策略不一致就自动创建/更新 Issue。
+#
+# 校验目标取自策略中 primary: true 的那一项（当前为 Cloudflare Pages）。
+
+on:
+  schedule:
+    # 每周一 03:00 UTC（北京时间 11:00）
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: conformance-monitor
+  cancel-in-progress: false
+
+jobs:
+  conformance:
+    name: 校验线上响应头
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 校验权威目标（策略中 primary 的那一项）
+        id: verify
+        run: |
+          set +e
+          node src/index.mjs verify --policy headers.policy.json --out out > verify.log 2>&1
+          code=$?
+          set -e
+          cat verify.log
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+          if [ "$code" -eq 2 ]; then
+            echo "::error::校验无法运行（网络或配置问题），本次不作判定"
+            exit 2
+          fi
+          if [ "$code" -eq 1 ]; then
+            echo "::warning::线上响应头与策略不一致 —— 防护可能已降级"
+          else
+            echo "::notice::线上响应头完全符合策略"
+          fi
+
+      - name: 对照观察：GitHub Pages（平台限制，长期预期不符合）
+        continue-on-error: true
+        run: |
+          echo "### 对照目标：GitHub Pages" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "GitHub Pages 不支持自定义响应头，此项长期预期为不符合，仅作记录。" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          node src/index.mjs verify --policy headers.policy.json \
+            --url https://frank2673.github.io/ --out out-gh 2>&1 | head -30 >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 写入 Actions 摘要
+        if: always()
+        run: |
+          if [ -f out/conformance.md ]; then
+            cat out/conformance.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: 上传一致性报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-report-${{ github.run_number }}
+          path: out/
+          retention-days: 90
+
+      - name: 不一致时创建或更新 Issue
+        if: always() && steps.verify.outputs.exit_code == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create header-drift \
+            --description "由 header-forge 监控发现的响应头降级" \
+            --color b60205 2>/dev/null || true
+
+          head -c 60000 out/conformance.md > /tmp/body.md
+
+          EXISTING=$(gh issue list --label header-drift --state open \
+            --json number --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            echo "向已有 Issue #$EXISTING 追加本次结果"
+            gh issue comment "$EXISTING" --body-file /tmp/body.md
+          else
+            gh issue create \
+              --title "🚨 安全响应头降级：线上与策略不一致（$(date -u +%Y-%m-%d)）" \
+              --body-file /tmp/body.md \
+              --label header-drift
+          fi

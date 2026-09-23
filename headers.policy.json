@@ -2,8 +2,13 @@
   "version": 1,
 
   "targets": {
+    "https://frank2673-site.pages.dev/": {
+      "primary": true,
+      "note": "权威校验目标：站点已部署到 Cloudflare Pages，由它执行 _headers 策略。此项必须完全符合，CI 会在每周自动校验并在不符合时开 Issue。"
+    },
     "frank2673.github.io": {
-      "note": "个人主页。当前托管于 GitHub Pages —— 该平台不支持自定义响应头，因此本策略需要由前置的 Cloudflare Pages / Netlify 代理层执行（免费套餐即可，无需自有域名）。迁移步骤见 MIGRATION.md。"
+      "primary": false,
+      "note": "GitHub Pages 部署（平台不支持自定义响应头）。此项长期预期为不符合，仅作记录与对照，不参与门禁。"
     }
   },
 

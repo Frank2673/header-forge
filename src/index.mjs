@@ -179,10 +179,17 @@ async function cmdVerify(args) {
   return nonCompliant ? 1 : 0;
 }
 
+/**
+ * 从策略中推断默认校验地址
+ * 优先选标记了 primary: true 的目标 —— 策略里可能同时记录多个部署目标
+ * （例如 GitHub Pages 预期不符合、Cloudflare Pages 必须符合）。
+ */
 function firstTarget(policy) {
-  const keys = Object.keys(policy.targets || {});
-  if (keys.length === 0) return null;
-  const key = keys[0];
+  const entries = Object.entries(policy.targets || {});
+  if (entries.length === 0) return null;
+
+  const primary = entries.find(([, cfg]) => cfg && cfg.primary === true);
+  const key = primary ? primary[0] : entries[0][0];
   return key.startsWith('http') ? key : `https://${key}/`;
 }
 
