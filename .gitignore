@@ -2,6 +2,8 @@
 dist/
 dist2/
 out/
+out-*/
+public/
 
 # ===== 系统文件 =====
 Thumbs.db
