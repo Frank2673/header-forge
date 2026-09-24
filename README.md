@@ -2,8 +2,11 @@
 
 [![CI](https://github.com/Frank2673/header-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/Frank2673/header-forge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![零依赖](https://img.shields.io/badge/运行时依赖-0-brightgreen)
+![测试](https://img.shields.io/badge/测试-111%20passed-brightgreen)
 
 **安全响应头配置即代码** —— 一次声明，多平台生成，线上校验，本地可证。
+支持从现有配置**反向导入**（接管别人的项目），并以往返一致性守卫保证生成与解析严格对称。
 
 > 配套项目：[surface-watch](https://github.com/Frank2673/surface-watch)（发现问题）→ **header-forge**（修掉问题并防止回退）
 
@@ -78,6 +81,62 @@ node src/index.mjs advise --html path/to/index.html
 
 > GitHub Pages 不在此列 —— 因为它**不支持**自定义响应头。迁移路径见 [MIGRATION.md](MIGRATION.md)。
 
+## 反向导入：接管一个已经有响应头配置的项目
+
+不用从零重写策略。手上已经有一份 `_headers` / `vercel.json` / nginx 片段 / Caddyfile 时：
+
+```bash
+$ node src/index.mjs import --from public/_headers
+
+📥 反向导入：public/_headers
+   识别格式：headers
+   解析出 2 个响应头
+
+   X-Frame-Options: SAMEORIGIN
+   X-Content-Type-Options: nosniff
+
+⚠️ 需要注意：
+   · X-Frame-Options 出现了多个取值（路径 /api/*）：保留后出现的「SAMEORIGIN」，丢弃「DENY」
+
+🛑 现状与安全基线有 3 处差距 —— 这份策略忠实反映了现状，因此它不满足基线：
+   · 缺少安全基线要求的响应头：Strict-Transport-Security
+   · 缺少安全基线要求的响应头：Content-Security-Policy
+   · 缺少安全基线要求的响应头：Referrer-Policy
+
+   ⚠️ 导入不会替你补齐这些 —— 补齐意味着站点"看起来合规"但实际没这些头。
+```
+
+退出码 **1**（与 `verify` 一致，可作 CI 门禁）。
+
+**三条刻意的设计决定**：
+
+1. **忠实反映现状，不顺手补齐**。导入出来的策略可能不满足安全基线 —— 那正是要给你看的差距。
+   如果导入时自动补上缺失的头，你会以为站点已经有这些防护，这是最危险的失败方式。
+2. **解析不了的行不静默丢弃**，都进 `skipped` 并在输出里列出来。
+3. **只恢复得回"名字与取值"**。`severity` 与 `why` 是人的判断，配置里没有这些信息，
+   导入时给占位值并标注"尚未人工确认"。
+
+### 验收标准：往返一致
+
+`generate` 出来的配置，`import` 回去必须得到**同一组名字与取值**。
+nginx / caddy 会把值里的 `"` 转义成 `\"`，导入时必须正确还原 —— 否则"接管别人项目"
+会从第一次生成就开始悄悄改坏配置。这条不变式由脚本强制：
+
+```bash
+$ npm run roundtrip
+
+🔄 往返一致性检查（策略：headers.policy.json）
+   原始策略有 7 个响应头
+
+✅ cloudflare-pages   headers  7/7 个头部往返一致
+✅ netlify            headers  7/7 个头部往返一致
+✅ vercel             vercel   7/7 个头部往返一致
+✅ nginx              nginx    7/7 个头部往返一致
+✅ caddy              caddy    7/7 个头部往返一致
+```
+
+CI 每次都会跑它 —— 生成器或解析器任何一侧改坏转义，都会当场红。
+
 ## CSP 顾问：既严格，又不打坏站点
 
 CSP 是最容易「配了就坏站」的响应头。本项目的做法是**先分析页面真实需求，再给策略**：
@@ -116,11 +175,12 @@ $ node src/index.mjs advise --html index.html --check headers.policy.json
 | 子命令 | 作用 | 退出码 |
 |---|---|---|
 | `generate` | 用策略生成各平台配置 | 0 成功 / 2 错误 |
+| `import` | 从现有配置反向导入，生成策略草稿 | 0 成功 / **1 现状不合规** / 2 错误 |
 | `verify` | 校验线上响应头是否与策略一致 | 0 一致 / 1 不一致 / 2 错误 |
 | `advise` | 分析页面并给出 CSP 建议 | 0 成功 / 1 hash 漂移 / 2 错误 |
 | `simulate` | 用生成的配置起服务并自校验 | 0 一致 / 1 不一致 / 2 错误 |
 
-通用参数：`--policy <路径>`、`--out <目录>`；各子命令另有 `--url`、`--html`、`--config`、`--only`、`--port`、`--check`。
+通用参数：`--policy <路径>`、`--out <目录/文件>`；各子命令另有 `--url`、`--html`、`--config`、`--only`、`--port`、`--check`、`--from`、`--format`、`--force`、`--stdout`。
 完整说明：`node src/index.mjs --help`
 
 ## 用在你自己的仓库里
@@ -173,16 +233,18 @@ jobs:
 
 - 生成的配置需要**由你部署到对应平台**才会生效；本工具不替你部署
 - `verify` 校验的是「单个 URL 的响应头」；若站点按路径设置不同头，需要对每个路径分别校验
+- 反向导入**只能恢复"名字与取值"**：`severity`/`why` 是人的判断，配置里没有；策略模型一个头只有一个取值，多路径块或多条 `source` 规则会被合并（合并时给出警告）
+- nginx 的 `location` 嵌套、Caddy 的匹配器等结构信息在策略模型里表达不了，导入时只反映"文件里写了哪些头"
 - CSP 顾问基于静态 HTML 分析：运行时才加载的脚本、动态创建的 iframe 等无法预知，仍建议先上 Report-Only
 - 不处理 DNS 层面的问题（如 DMARC 记录）—— 那是 surface-watch 的领域，且需要自有域名
 
 ## 路线图
 
+- [x] 支持读取已有 `_headers` / `vercel.json` / nginx / Caddyfile 做**反向导入**（含往返一致性守卫）
 - [ ] 支持 Cloudflare Transform Rules API 直接下发（省去手工粘贴）
 - [ ] 增加 `--paths` 批量校验多个 URL
 - [ ] 输出 SARIF，接入 GitHub Code Scanning
-- [ ] 支持读取已有 `_headers` / `vercel.json` 做**反向导入**（从现状生成策略）
-- [ ] 增加 Apache `.htaccess` 生成器
+- [ ] 增加 Apache `.htaccess` 生成器（含反向导入）
 
 ## 许可
 

@@ -2,21 +2,23 @@
 /**
  * header-forge 命令行入口
  *
- * 四个子命令：
+ * 五个子命令：
  *   generate  用策略生成各平台配置
+ *   import    从现有配置反向导入，生成策略草稿（接管别人的项目时用）
  *   verify    校验线上响应头是否与策略一致
  *   advise    分析页面并给出不会破坏站点的 CSP 建议
  *   simulate  用生成的配置文件起本地服务并自校验（证明配置有效）
  *
- * 退出码：0 = 通过；1 = 校验不一致（可作 CI 门禁）；2 = 运行错误
+ * 退出码：0 = 通过；1 = 校验不一致/现状不合规（可作 CI 门禁）；2 = 运行错误
  *
  * @module index
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
-import { loadPolicy, PolicyError, summarizePolicy } from './lib/policy.mjs';
+import { loadPolicy, PolicyError, summarizePolicy, collectPolicyProblems } from './lib/policy.mjs';
 import { generateAll, GENERATOR_IDS } from './generators/index.mjs';
+import { analyzeImport, IMPORT_FORMATS } from './importer.mjs';
 import { verifyUrl } from './verify.mjs';
 import { analyzePage, suggestCsp, checkHashDrift } from './advise.mjs';
 import { startSimulator } from './simulate.mjs';
@@ -32,17 +34,25 @@ header-forge v${VERSION} —— 安全响应头配置即代码（零依赖）
 
 子命令：
   generate    用策略生成各平台配置
+  import      从现有配置反向导入，生成策略草稿
   verify      校验线上响应头是否与策略一致
   advise      分析页面并给出 CSP 建议
   simulate    用生成的配置文件起本地服务并自校验
 
 通用选项：
   --policy <路径>     策略文件（默认 headers.policy.json）
-  --out <目录>        输出目录（默认 dist）
+  --out <目录/文件>   输出目录（generate）或输出文件（import）
 
 generate 选项：
   --only <生成器>     只生成指定平台，逗号分隔
                       可选：${GENERATOR_IDS.join(', ')}
+
+import 选项：
+  --from <路径>       要导入的现有配置（_headers / vercel.json / nginx 片段 / Caddyfile）
+  --format <格式>     指定格式，不给则自动识别：${IMPORT_FORMATS.join(' / ')}
+  --out <路径>        输出策略文件（默认 headers.policy.imported.json）
+  --force             允许覆盖已存在的输出文件
+  --stdout            把策略 JSON 打到标准输出，不写文件
 
 verify 选项：
   --url <地址>        校验地址（默认取策略中第一个 target）
@@ -58,13 +68,17 @@ simulate 选项：
 
 示例：
   node src/index.mjs generate --policy headers.policy.json --out dist
+  node src/index.mjs import --from public/_headers
+  node src/index.mjs import --from nginx.conf --format nginx --stdout
   node src/index.mjs verify --policy headers.policy.json
   node src/index.mjs simulate --config dist/_headers --policy headers.policy.json
 `.trim();
 
 function parseArgs(argv) {
   const args = { _: [] };
-  const takesValue = new Set(['--policy', '--out', '--url', '--html', '--config', '--only', '--port', '--check']);
+  const takesValue = new Set([
+    '--policy', '--out', '--url', '--html', '--config', '--only', '--port', '--check', '--from', '--format',
+  ]);
 
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
@@ -128,6 +142,111 @@ function cmdGenerate(args) {
 
   console.log(`\n共生成 ${artifacts.length} 份配置 → ${outDir}/`);
   return 0;
+}
+
+/* ============================= import ============================= */
+
+/**
+ * 反向导入：把现有配置变成策略草稿
+ *
+ * 关键立场：**忠实反映现状，不顺手补齐**。导入出的策略可能不满足安全基线，
+ * 那正是要展示给用户的差距 —— 如果导入时悄悄补上缺失的头，用户会以为站点
+ * 已经有了这些防护，这是最危险的失败方式。
+ *
+ * 现状不合规时返回 1（与 verify 一致，可作 CI 门禁）。
+ */
+function cmdImport(args) {
+  const fromPath = args.from;
+  if (!fromPath) {
+    throw new Error('需要 --from <路径>，指定要导入的现有配置文件');
+  }
+  if (!existsSync(fromPath)) {
+    throw new Error(`文件不存在：${fromPath}`);
+  }
+
+  const text = readFileSync(fromPath, 'utf8');
+  const result = analyzeImport(text, { format: args.format, filename: fromPath });
+
+  if (!result.ok) {
+    console.error(`🛑 导入失败：${result.error}`);
+    if (result.skipped?.length) {
+      console.error('   解析过程中跳过的内容：');
+      for (const s of result.skipped) console.error(`     · [${s.where}] ${s.line}`);
+    }
+    return 2;
+  }
+
+  const { draft, gaps, imported } = result;
+
+  console.log(`📥 反向导入：${fromPath}`);
+  console.log(`   识别格式：${imported.format}`);
+  console.log(`   解析出 ${imported.headerCount} 个响应头`);
+  console.log('');
+
+  for (const [name, value] of Object.entries(imported.headers)) {
+    const shown = value.length > 72 ? value.slice(0, 69) + '…' : value;
+    console.log(`   ${name}: ${shown}`);
+  }
+  if (imported.remove.length) {
+    console.log('');
+    console.log(`   删除指令：${imported.remove.join(', ')}`);
+  }
+  console.log('');
+
+  if (imported.skipped.length) {
+    console.log(`⚠️ 有 ${imported.skipped.length} 处内容无法解析（已保留在报告里，未静默丢弃）：`);
+    for (const s of imported.skipped.slice(0, 10)) {
+      console.log(`   · [${s.where}] ${s.line}`);
+    }
+    if (imported.skipped.length > 10) console.log(`   · …另有 ${imported.skipped.length - 10} 处`);
+    console.log('');
+  }
+
+  if (imported.warnings.length) {
+    console.log('⚠️ 需要注意：');
+    for (const w of imported.warnings) console.log(`   · ${w}`);
+    console.log('');
+  }
+
+  if (gaps.length) {
+    console.log(`🛑 现状与安全基线有 ${gaps.length} 处差距 —— 这份策略忠实反映了现状，因此它不满足基线：`);
+    for (const g of gaps) console.log(`   · ${g}`);
+    console.log('');
+    console.log('   ⚠️ 导入不会替你补齐这些 —— 补齐意味着站点"看起来合规"但实际没这些头。');
+    console.log('      请改好策略里对应的取值，再走 generate → simulate → 发布的流程。');
+    console.log('');
+  } else {
+    console.log('✅ 现状已满足全部安全基线（导入的头与基线要求一致）');
+    console.log('');
+  }
+
+  const json = JSON.stringify(draft, null, 2) + '\n';
+
+  if (args.stdout) {
+    process.stdout.write(json);
+    return gaps.length ? 1 : 0;
+  }
+
+  const outPath = args.out || 'headers.policy.imported.json';
+  if (existsSync(outPath) && !args.force) {
+    console.error(`🛑 输出文件已存在：${outPath}`);
+    console.error('   用 --force 覆盖，或改 --out 换个名字。');
+    console.error('   （默认不覆盖：策略文件是人工改过的资产，误覆盖代价高）');
+    return 2;
+  }
+
+  writeFileSync(outPath, json, 'utf8');
+  console.log(`📄 策略草稿已写入：${outPath}`);
+  console.log('');
+  console.log('   下一步：');
+  console.log(`     1. 打开 ${outPath}，把 why 字段从占位说明改成真实理由`);
+  if (gaps.length) console.log('     2. 按上面的差距清单修掉缺失/过弱的头');
+  console.log('     3. 改好后改名为 headers.policy.json，再跑 generate 与 simulate');
+  console.log('');
+  console.log('   注意：导入只恢复"头部名与取值"—— severity 与 why 是人的判断，');
+  console.log('         配置里没有这些信息，所以导入时给了占位值。');
+
+  return gaps.length ? 1 : 0;
 }
 
 /* ============================= verify ============================= */
@@ -331,6 +450,8 @@ async function main() {
   switch (command) {
     case 'generate':
       return cmdGenerate(args);
+    case 'import':
+      return cmdImport(args);
     case 'verify':
       return cmdVerify(args);
     case 'advise':

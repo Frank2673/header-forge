@@ -64,6 +64,18 @@ jobs:
       - name: 本地模拟自证（生成的配置必须满足策略）
         run: node src/index.mjs simulate --config dist/_headers --policy headers.policy.json
 
+      - name: 往返一致性（generate → import 必须得到同一组名字与取值）
+        run: node scripts/check-roundtrip.mjs headers.policy.json
+
+      - name: 反向导入冒烟（真实生成的 _headers 能被导入回来）
+        run: node src/index.mjs import --from dist/_headers --out /tmp/imported.json
+
+      # 说明：这里刻意不再用 bash 写"负向验证"（改坏生成器 → 期望检查失败 → 恢复）。
+      # 那种片段本地跑不了、嵌套转义本身就是新的失败源，而且它要证明的事情
+      # 已由 tests/roundtrip.test.mjs 覆盖：diffHeaderMaps 双向验证 + "格式认错"用例。
+      # 一个把守卫的负向验证交给单元测试、而不是交给 CI 里的字符串拼接，
+      # 是更可靠的分工。
+
       - name: CSP hash 漂移检测必须通过（夹具页面与夹具策略一致）
         run: node src/index.mjs advise --html fixtures/site.html --check fixtures/site.policy.json
 

@@ -12,9 +12,11 @@
   },
   "scripts": {
     "generate": "node src/index.mjs generate --policy headers.policy.json --out dist",
+    "import": "node src/index.mjs import",
     "verify": "node src/index.mjs verify --policy headers.policy.json",
     "advise": "node src/index.mjs advise --url https://frank2673.github.io/",
     "simulate": "node src/index.mjs simulate --config dist/_headers",
+    "roundtrip": "node scripts/check-roundtrip.mjs headers.policy.json",
     "test": "node --test tests/"
   },
   "keywords": [

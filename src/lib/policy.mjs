@@ -98,9 +98,20 @@ export function loadPolicy(filePath) {
 }
 
 /**
- * 校验策略对象（供测试直接调用）
+ * 收集策略问题（**不抛异常**）
+ *
+ * 与 validatePolicy 的分工：
+ *   - 结构性问题（不是对象、没有 headers）仍然抛错 —— 那种输入连"策略"都不是，
+ *     继续分析没有意义
+ *   - 基线问题（缺头、弱值）作为 problems 返回，交给调用方决定怎么用
+ *
+ * 反向导入需要后者：从现有配置导入的策略**本来就可能不满足基线**，
+ * 那正是要展示给用户的差距，而不是一个该炸掉的错误。
+ *
+ * @param {object} policy
+ * @returns {{normalized: object, problems: string[]}}
  */
-export function validatePolicy(policy) {
+export function collectPolicyProblems(policy) {
   if (!policy || typeof policy !== 'object') {
     throw new PolicyError('策略必须是一个对象');
   }
@@ -201,6 +212,18 @@ export function validatePolicy(policy) {
   if (normalized['X-Content-Type-Options'] && normalized['X-Content-Type-Options'].value.toLowerCase() !== 'nosniff') {
     problems.push('X-Content-Type-Options 只能是 nosniff');
   }
+
+  return { normalized, problems };
+}
+
+/**
+ * 校验策略对象（有问题就抛错）
+ *
+ * @param {object} policy
+ * @returns {{version: number, targets: object, headers: object, remove: string[], raw: object}}
+ */
+export function validatePolicy(policy) {
+  const { normalized, problems } = collectPolicyProblems(policy);
 
   if (problems.length > 0) {
     throw new PolicyError(`策略校验失败：\n   - ${problems.join('\n   - ')}`);
