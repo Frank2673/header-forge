@@ -93,7 +93,9 @@ test('**四种格式往返全部一致**（含双引号转义）', () => {
 
   assert.equal(artifacts.length, 5, '五种平台产物');
 
-  /* 逐个产物导入回来比对名字与取值 */
+  /* 逐个产物导入回来比对名字与取值。
+     这里显式 include: 'all' —— 往返测的是"生成器与解析器严格对称"，
+     默认的安全类过滤是产品层面的取舍，不该掺进这条不变式。 */
   for (const artifact of artifacts) {
     /* cloudflare-pages 与 netlify 都是 _headers 格式，用同一个解析器 */
     const format = artifact.id === 'vercel' ? 'vercel'
@@ -101,7 +103,7 @@ test('**四种格式往返全部一致**（含双引号转义）', () => {
       : artifact.id === 'caddy' ? 'caddy'
       : 'headers';
 
-    const r = importConfig(artifact.content, { format, filename: artifact.filename });
+    const r = importConfig(artifact.content, { format, filename: artifact.filename, include: 'all' });
     assert.equal(r.ok, true, `${artifact.id} 导入失败：${r.error}`);
 
     assert.deepEqual(
@@ -313,6 +315,85 @@ test('现状满足基线时 gaps 为空', () => {
 
   const r = analyzeImport(good, { format: 'headers' });
   assert.deepEqual(r.gaps, []);
+});
+
+/* ------------------------- 导入范围：默认只接管安全类 ------------------------- */
+
+test('默认只导入安全响应头，非安全头进 ignored 并说明原因', () => {
+  const text = [
+    '/*',
+    '  X-Frame-Options: DENY',
+    '  Cache-Control: public, max-age=3600',
+    '  Access-Control-Allow-Origin: *',
+    '  Content-Type: text/html; charset=utf-8',
+  ].join('\n');
+
+  const r = importConfig(text, { format: 'headers' });
+  assert.equal(r.ok, true);
+  assert.deepEqual(Object.keys(r.headers), ['X-Frame-Options']);
+
+  assert.deepEqual(
+    r.ignored.map((i) => i.name).sort(),
+    ['Access-Control-Allow-Origin', 'Cache-Control', 'Content-Type']
+  );
+  for (const i of r.ignored) assert.match(i.reason, /不属于安全响应头/);
+});
+
+test('include: all 时全量导入', () => {
+  const text = '/*\n  X-Frame-Options: DENY\n  Cache-Control: no-store\n';
+  const r = importConfig(text, { format: 'headers', include: 'all' });
+
+  assert.deepEqual(Object.keys(r.headers).sort(), ['Cache-Control', 'X-Frame-Options']);
+  assert.deepEqual(r.ignored, []);
+});
+
+test('文件里只有非安全头时明确报错并给出 --all 的出路', () => {
+  const r = importConfig('/*\n  Cache-Control: no-store\n', { format: 'headers' });
+
+  assert.equal(r.ok, false);
+  assert.match(r.error, /都不是安全响应头/);
+  assert.match(r.error, /Cache-Control/);
+  assert.match(r.error, /--all/);
+  assert.equal(r.ignored.length, 1);
+});
+
+test('**非安全头的按路径冲突不产生噪音警告**（真实世界的主要形态）', () => {
+  /* 这是抓了 9 份公开仓库配置后发现的形态：Cache-Control 按路径分别取值。
+     我们根本不导入 Cache-Control，所以不该为它报冲突 —— 那会淹没真正的问题。 */
+  const text = [
+    '/*',
+    '  Cache-Control: public, max-age=0, must-revalidate',
+    '  X-Frame-Options: DENY',
+    '/fonts/*',
+    '  Cache-Control: public, max-age=31536000, immutable',
+    '/img/*',
+    '  Cache-Control: public, max-age=86400, immutable',
+  ].join('\n');
+
+  const r = importConfig(text, { format: 'headers' });
+  assert.equal(r.ok, true);
+  assert.deepEqual(Object.keys(r.headers), ['X-Frame-Options']);
+  assert.deepEqual(r.warnings, [], '不该为不导入的头报冲突');
+
+  /* 同一个文件用 include: all 导入时，冲突就必须报出来 */
+  const all = importConfig(text, { format: 'headers', include: 'all' });
+  assert.ok(all.warnings.some((w) => w.includes('Cache-Control 出现了多个取值')));
+});
+
+test('安全头确实按路径冲突时仍然报警（不因为过滤而漏掉真问题）', () => {
+  const text = ['/*', '  X-Frame-Options: DENY', '/api/*', '  X-Frame-Options: SAMEORIGIN'].join('\n');
+
+  const r = importConfig(text, { format: 'headers' });
+  assert.equal(r.headers['X-Frame-Options'], 'SAMEORIGIN');
+  assert.ok(r.warnings.some((w) => w.includes('X-Frame-Options 出现了多个取值')));
+  assert.ok(r.warnings.some((w) => w.includes('按路径不同')), '应指出是路径差异导致的');
+});
+
+test('路径块多但安全头取值一致时不报结构警告（多数真实配置是这个样子）', () => {
+  const text = ['/*', '  X-Frame-Options: DENY', '/api/*', '  X-Frame-Options: DENY'].join('\n');
+  const r = importConfig(text, { format: 'headers' });
+
+  assert.deepEqual(r.warnings, [], '重复声明同一个值不是问题，不该报警');
 });
 
 /* ------------------------- 策略草稿 ------------------------- */

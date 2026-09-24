@@ -43,15 +43,18 @@ jobs:
 
       - name: 产物齐全性检查
         run: |
-          for f in dist/_headers dist/vercel.json dist/nginx/nginx-security-headers.conf dist/caddy/Caddyfile.headers dist/manifest.json; do
+          # netlify 与 cloudflare-pages 都叫 _headers，落点必须被分开 —— 两份都要存在，
+          # 否则就是"谁后写谁生效"的静默覆盖又回来了。
+          for f in dist/_headers dist/netlify/_headers dist/vercel.json \
+                   dist/nginx/nginx-security-headers.conf dist/caddy/Caddyfile.headers dist/manifest.json; do
             if [ ! -f "$f" ]; then echo "❌ 缺少产物：$f"; exit 1; fi
           done
-          echo "✅ 五份产物 + 清单齐全"
+          echo "✅ 五份产物 + 清单齐全，同名产物已分目录"
 
       - name: 生成结果可复现（重复生成必须完全一致）
         run: |
           node src/index.mjs generate --policy headers.policy.json --out dist2 > /dev/null
-          for f in dist/_headers dist/vercel.json dist/nginx/nginx-security-headers.conf dist/caddy/Caddyfile.headers; do
+          for f in dist/_headers dist/netlify/_headers dist/vercel.json dist/nginx/nginx-security-headers.conf dist/caddy/Caddyfile.headers; do
             g=$(echo "$f" | sed 's|^dist/|dist2/|')
             if ! diff -q "$f" "$g" > /dev/null; then
               echo "❌ 产物不确定：$f 与 $g 不一致"

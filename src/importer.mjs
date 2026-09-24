@@ -25,6 +25,37 @@ import { parseHeadersFile } from './generators/headers-file.mjs';
 /** 支持的导入格式 */
 export const IMPORT_FORMATS = ['headers', 'vercel', 'nginx', 'caddy'];
 
+/**
+ * 本工具管治的响应头（安全类）
+ *
+ * 为什么要有这个白名单：真实世界的 `_headers` 文件里，`Cache-Control` 往往是
+ * **按路径分别取值**的（抓了 9 份公开仓库的配置，4 份都是这个形态，最多一份
+ * 有 14 个路径块）。而策略模型是「一个头一个取值」——
+ * 把这些头导进来会压平它们的按路径差异，用户一旦"导入 → 改名 → generate → 发布"，
+ * 就会用一条规则替换掉对方整套缓存策略，**直接搞坏线上缓存**。
+ *
+ * 根因是分类错误：`Cache-Control` / `Content-Type` / `Access-Control-*` 不是安全响应头，
+ * 本工具不该接管它们。默认只导入安全类，其余明确报告为"未接管"。
+ * 确实需要全量导入时用 --all（此时按路径冲突会给出警告）。
+ */
+export const SECURITY_HEADERS = new Set([
+  'Strict-Transport-Security',
+  'Content-Security-Policy',
+  'Content-Security-Policy-Report-Only',
+  'X-Content-Type-Options',
+  'X-Frame-Options',
+  'X-Xss-Protection',
+  'Referrer-Policy',
+  'Permissions-Policy',
+  'Cross-Origin-Opener-Policy',
+  'Cross-Origin-Embedder-Policy',
+  'Cross-Origin-Resource-Policy',
+  'X-Permitted-Cross-Domain-Policies',
+  'X-Download-Options',
+  'X-Dns-Prefetch-Control',
+  'Clear-Site-Data',
+]);
+
 /** 从现有配置导入的头，其 why 字段的占位说明 */
 const IMPORTED_WHY = '（从现有配置导入，尚未人工确认）';
 
@@ -74,21 +105,44 @@ export function unescapeQuoted(text) {
   return out;
 }
 
-/** 内部：累加头部，重复时记入 warnings */
-function makeCollector() {
+/**
+ * 内部：累加头部
+ *
+ * @param {(name: string) => boolean} keep 哪些头要接管（不接管的进 ignored，且不参与冲突检测 ——
+ *   否则会给"根本不导入的头"报冲突，把真正的问题淹没在噪音里）
+ */
+function makeCollector(keep = () => true) {
   const headers = {};
+  const ignored = new Map();
   const remove = [];
   const skipped = [];
   const warnings = [];
+  /* 记录被保留的头里出现了冲突取值的那些名字，供上层决定要不要提"多路径块" */
+  const conflicts = new Set();
 
   return {
     headers,
     remove,
     skipped,
     warnings,
+    conflicts,
+    get ignored() {
+      return [...ignored.entries()].map(([name, value]) => ({
+        name,
+        value,
+        reason: '不属于安全响应头，本工具不接管（它常按路径取值，压平会改变线上行为）',
+      }));
+    },
     set(name, value, where) {
       const canonical = canonicalHeaderName(name);
+
+      if (!keep(canonical)) {
+        ignored.set(canonical, value);
+        return;
+      }
+
       if (headers[canonical] !== undefined && headers[canonical] !== value) {
+        conflicts.add(canonical);
         warnings.push(
           `${canonical} 出现了多个取值（${where}）：保留后出现的「${value}」，丢弃「${headers[canonical]}」\n` +
             `      策略模型里一个头只能有一个取值；若确实需要按路径区分，请拆成多份策略`
@@ -112,10 +166,11 @@ function makeCollector() {
  * 解析 `_headers`（Cloudflare Pages / Netlify）
  *
  * 多路径块会被合并成一张表 —— 策略模型里一个头只有一个取值。
- * 若不同块给出不同取值，记入 warnings（不静默择一）。
+ * 只有在**被保留的头**确实出现冲突取值时才提"多路径块"：否则那条提示会变成
+ * 噪音（真实配置里几乎每个文件都有多个路径块，多数只是重复相同的安全头）。
  */
-export function parseHeadersConfig(text) {
-  const c = makeCollector();
+export function parseHeadersConfig(text, keep) {
+  const c = makeCollector(keep);
   const blocks = parseHeadersFile(text);
 
   if (blocks.length === 0) {
@@ -129,10 +184,10 @@ export function parseHeadersConfig(text) {
     }
   }
 
-  if (blocks.length > 1) {
+  if (blocks.length > 1 && c.conflicts.size > 0) {
     c.warnings.push(
-      `文件里有 ${blocks.length} 个路径块（${blocks.map((b) => b.pattern).join(', ')}）——` +
-        `已合并为一张表；若各路径的取值本就不同，导入结果会丢失这层区分`
+      `文件里有 ${blocks.length} 个路径块（${blocks.map((b) => b.pattern).join(', ')}），` +
+        `其中 ${[...c.conflicts].join(', ')} 的取值按路径不同 —— 已合并为一张表，这层区分会丢失`
     );
   }
 
@@ -145,8 +200,8 @@ export function parseHeadersConfig(text) {
  * 只认 `add_header <名> "<值>" [always];`（值也可不带引号）。
  * 不解析 location 嵌套结构 —— 结构信息会被记入 warning，因为在策略模型里表达不了。
  */
-export function parseNginxHeaders(text) {
-  const c = makeCollector();
+export function parseNginxHeaders(text, keep) {
+  const c = makeCollector(keep);
   const re = /^\s*add_header\s+([A-Za-z0-9_-]+)\s+("(?:[^"\\]|\\.)*"|'[^']*'|\S+)\s*(always\s*)?;/gim;
 
   let match;
@@ -179,8 +234,8 @@ export function parseNginxHeaders(text) {
  * 支持 `Name "value"` 与删除指令 `-Name`。
  * 用花括号深度定位 header 块，避免把站点块里的其它指令当成响应头。
  */
-export function parseCaddyHeaders(text) {
-  const c = makeCollector();
+export function parseCaddyHeaders(text, keep) {
+  const c = makeCollector(keep);
   const lines = String(text).split(/\r?\n/);
 
   let depth = 0;
@@ -243,8 +298,8 @@ export function parseCaddyHeaders(text) {
  *
  * 多条 source 规则会合并；取值冲突时记入 warnings。
  */
-export function parseVercelHeaders(text) {
-  const c = makeCollector();
+export function parseVercelHeaders(text, keep) {
+  const c = makeCollector(keep);
 
   let json;
   try {
@@ -272,10 +327,10 @@ export function parseVercelHeaders(text) {
     }
   }
 
-  if (rules.length > 1) {
+  if (rules.length > 1 && c.conflicts.size > 0) {
     c.warnings.push(
-      `vercel.json 里有 ${rules.length} 条 source 规则（${rules.map((r) => r?.source || '/(.*)').join(', ')}）——` +
-        `已合并为一张表；按路径区分不同取值的能力会在导入时丢失`
+      `vercel.json 里有 ${rules.length} 条 source 规则（${rules.map((r) => r?.source || '/(.*)').join(', ')}），` +
+        `其中 ${[...c.conflicts].join(', ')} 的取值按 source 不同 —— 已合并为一张表，这层区分会丢失`
     );
   }
 
@@ -296,10 +351,13 @@ const PARSERS = {
  * @param {object} [options]
  * @param {string} [options.format] 指定格式；不给则自动识别
  * @param {string} [options.filename] 用于识别格式
- * @returns {{ok: boolean, error?: string, format?: string, headers?: object, remove?: string[], skipped?: Array, warnings?: Array}}
+ * @param {'security'|'all'} [options.include='security'] 导入范围
+ * @returns {{ok: boolean, error?: string, format?: string, headers?: object, remove?: string[],
+ *            ignored?: Array<{name:string,value:string,reason:string}>, skipped?: Array, warnings?: Array}}
  */
 export function importConfig(text, options = {}) {
   const format = options.format || detectFormat(text, options.filename);
+  const include = options.include === 'all' ? 'all' : 'security';
 
   if (!format) {
     return {
@@ -315,23 +373,36 @@ export function importConfig(text, options = {}) {
     return { ok: false, error: `不支持的格式：${format}（可选：${IMPORT_FORMATS.join(' / ')}）` };
   }
 
-  const collected = PARSERS[format](text);
-  const headerCount = Object.keys(collected.headers).length;
+  /* 默认只接管安全类响应头；其余明确报告为"未接管"而不是悄悄丢掉。
+     过滤在收集阶段就生效（见 makeCollector），所以非安全头的按路径冲突
+     不会产生噪音警告 —— 那些头我们根本不导入，报它们的冲突只会淹没真正的问题。 */
+  const keep = include === 'all' ? () => true : (name) => SECURITY_HEADERS.has(name);
+  const collected = PARSERS[format](text, keep);
+
+  const headers = collected.headers;
+  const ignored = collected.ignored;
+  const headerCount = Object.keys(headers).length;
 
   if (headerCount === 0 && collected.remove.length === 0) {
+    const onlyNonSecurity = ignored.length > 0;
     return {
       ok: false,
-      error: `按 ${format} 格式解析完成，但没有得到任何响应头。`,
+      error: onlyNonSecurity
+        ? `文件里有 ${ignored.length} 个响应头，但都不是安全响应头（${ignored.map((i) => i.name).join(', ')}）——` +
+          `本工具不接管它们。若确实要全量导入，请加 --all。`
+        : `按 ${format} 格式解析完成，但没有得到任何响应头。`,
       format,
       skipped: collected.skipped,
+      ignored,
     };
   }
 
   return {
     ok: true,
     format,
-    headers: collected.headers,
+    headers,
     remove: collected.remove,
+    ignored,
     skipped: collected.skipped,
     warnings: collected.warnings,
     headerCount,

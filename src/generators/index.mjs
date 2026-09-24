@@ -39,3 +39,40 @@ export function generateAll(policy, options = {}) {
 }
 
 export { parseHeadersFile, resolveHeadersForPath, matchesPattern } from './headers-file.mjs';
+
+/**
+ * 规划每份产物的落盘路径
+ *
+ * 为什么需要它：Cloudflare Pages 与 Netlify 都输出 `_headers`（格式相同、注释不同）。
+ * 如果直接按文件名写入，两者会落在同一个路径 —— **谁后写谁生效**，
+ * 结果取决于生成器的遍历顺序。那样"生成产物"就带上了静默的不确定性：
+ * 同一份策略在不同版本、不同 --only 组合下可能产出不同的文件。
+ *
+ * 规则：
+ *   - nginx / caddy 与带路径的产物，一直放自己的子目录
+ *   - 其余产物放 outDir 根下；**若该名字已被占用**，则放进自己的子目录并标记 disambiguated
+ *
+ * @param {string} outDir
+ * @param {Array<{id:string,filename:string}>} artifacts
+ * @returns {Array<{artifact: object, target: string, disambiguated: boolean}>}
+ */
+export function planOutputPaths(outDir, artifacts) {
+  const taken = new Set();
+
+  return artifacts.map((artifact) => {
+    const nested = artifact.filename.includes('/') || artifact.id === 'nginx' || artifact.id === 'caddy';
+
+    let target = nested
+      ? `${outDir}/${artifact.id}/${artifact.filename}`
+      : `${outDir}/${artifact.filename}`;
+    let disambiguated = false;
+
+    if (taken.has(target)) {
+      target = `${outDir}/${artifact.id}/${artifact.filename}`;
+      disambiguated = true;
+    }
+    taken.add(target);
+
+    return { artifact, target, disambiguated };
+  });
+}

@@ -17,8 +17,8 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { loadPolicy, PolicyError, summarizePolicy, collectPolicyProblems } from './lib/policy.mjs';
-import { generateAll, GENERATOR_IDS } from './generators/index.mjs';
-import { analyzeImport, IMPORT_FORMATS } from './importer.mjs';
+import { generateAll, GENERATOR_IDS, planOutputPaths } from './generators/index.mjs';
+import { analyzeImport, IMPORT_FORMATS, SECURITY_HEADERS } from './importer.mjs';
 import { verifyUrl } from './verify.mjs';
 import { analyzePage, suggestCsp, checkHashDrift } from './advise.mjs';
 import { startSimulator } from './simulate.mjs';
@@ -51,8 +51,13 @@ import 选项：
   --from <路径>       要导入的现有配置（_headers / vercel.json / nginx 片段 / Caddyfile）
   --format <格式>     指定格式，不给则自动识别：${IMPORT_FORMATS.join(' / ')}
   --out <路径>        输出策略文件（默认 headers.policy.imported.json）
+  --all               连非安全响应头一起导入（默认只导入安全类，见下）
   --force             允许覆盖已存在的输出文件
   --stdout            把策略 JSON 打到标准输出，不写文件
+
+  默认只导入安全响应头。原因：真实配置里 Cache-Control / Content-Type / Access-Control-*
+  常按路径分别取值，而策略模型是一个头一个取值 —— 全量导入会压平差异，
+  重新生成发布时就会替换掉原有的按路径规则。
 
 verify 选项：
   --url <地址>        校验地址（默认取策略中第一个 target）
@@ -111,16 +116,15 @@ function cmdGenerate(args) {
 
   mkdirSync(outDir, { recursive: true });
 
-  for (const artifact of artifacts) {
-    /* nginx / caddy 的产物放进子目录，避免同名覆盖 */
-    const target =
-      artifact.filename.includes('/') || artifact.id === 'nginx' || artifact.id === 'caddy'
-        ? join(outDir, artifact.id, artifact.filename)
-        : join(outDir, artifact.filename);
-
+  /* 落点由 planOutputPaths 统一决定 —— 不能靠遍历顺序，
+     否则同名产物（Cloudflare Pages 与 Netlify 都叫 _headers）会互相静默覆盖。 */
+  for (const { artifact, target, disambiguated } of planOutputPaths(outDir, artifacts)) {
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, artifact.content, 'utf8');
     console.log(`  ✅ ${artifact.label.padEnd(18)} → ${target}`);
+    if (disambiguated) {
+      console.log(`     · 与前面某个平台的产物同名，已放进子目录以免互相覆盖`);
+    }
     for (const note of artifact.notes || []) console.log(`     · ${note}`);
   }
 
@@ -165,10 +169,18 @@ function cmdImport(args) {
   }
 
   const text = readFileSync(fromPath, 'utf8');
-  const result = analyzeImport(text, { format: args.format, filename: fromPath });
+  const result = analyzeImport(text, {
+    format: args.format,
+    filename: fromPath,
+    include: args.all ? 'all' : 'security',
+  });
 
   if (!result.ok) {
     console.error(`🛑 导入失败：${result.error}`);
+    if (result.ignored?.length) {
+      console.error('   被跳过的非安全响应头：');
+      for (const i of result.ignored) console.error(`     · ${i.name}`);
+    }
     if (result.skipped?.length) {
       console.error('   解析过程中跳过的内容：');
       for (const s of result.skipped) console.error(`     · [${s.where}] ${s.line}`);
@@ -199,6 +211,17 @@ function cmdImport(args) {
       console.log(`   · [${s.where}] ${s.line}`);
     }
     if (imported.skipped.length > 10) console.log(`   · …另有 ${imported.skipped.length - 10} 处`);
+    console.log('');
+  }
+
+  if (imported.ignored && imported.ignored.length) {
+    console.log(`ℹ️ 有 ${imported.ignored.length} 个响应头未接管（默认只导入安全类）：`);
+    for (const i of imported.ignored) console.log(`   · ${i.name}`);
+    console.log('');
+    console.log('   为什么：这些头（如 Cache-Control）在真实配置里常按路径分别取值，');
+    console.log('   而策略模型是一个头一个取值 —— 导进来会压平差异，');
+    console.log('   一旦重新生成发布，就会替换掉你原有的按路径规则。');
+    console.log('   它们留在原配置里即可。确实要全量导入请加 --all。');
     console.log('');
   }
 

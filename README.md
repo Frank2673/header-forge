@@ -108,13 +108,46 @@ $ node src/index.mjs import --from public/_headers
 
 退出码 **1**（与 `verify` 一致，可作 CI 门禁）。
 
-**三条刻意的设计决定**：
+**四条刻意的设计决定**：
 
 1. **忠实反映现状，不顺手补齐**。导入出来的策略可能不满足安全基线 —— 那正是要给你看的差距。
    如果导入时自动补上缺失的头，你会以为站点已经有这些防护，这是最危险的失败方式。
-2. **解析不了的行不静默丢弃**，都进 `skipped` 并在输出里列出来。
-3. **只恢复得回"名字与取值"**。`severity` 与 `why` 是人的判断，配置里没有这些信息，
+2. **默认只接管安全响应头**（见下）。
+3. **解析不了的行不静默丢弃**，都进 `skipped` 并在输出里列出来。
+4. **只恢复得回"名字与取值"**。`severity` 与 `why` 是人的判断，配置里没有这些信息，
    导入时给占位值并标注"尚未人工确认"。
+
+### 为什么默认不导入 `Cache-Control` 这类头
+
+这一条不是拍脑袋定的，是抓了 **9 份公开仓库的真实 `_headers`** 之后改的
+（语料与出处见 [`fixtures/real-world/SOURCES.md`](fixtures/real-world/SOURCES.md)）：
+
+**真实配置里 `Cache-Control` 几乎总是按路径分别取值** —— 9 份里有 4 份，最多一份有 14 个路径块：
+
+```
+/*
+  Cache-Control: public, max-age=0, must-revalidate
+/fonts/*
+  Cache-Control: public, max-age=31536000, immutable
+/img/*
+  Cache-Control: public, max-age=86400, immutable
+```
+
+而策略模型是「一个头一个取值」。全量导入会把这三条压平成一条，
+用户一旦"导入 → 改名 → generate → 发布"，就会**用一条规则替换掉对方整套缓存策略**，
+直接搞坏线上缓存。
+
+根因是分类错误：`Cache-Control` / `Content-Type` / `Access-Control-*` 不是安全响应头，
+本工具不该接管它们。所以：
+
+- **默认**只导入安全类，其余明确报告为"未接管"（不是悄悄丢掉）
+- 非安全头的按路径冲突**不产生警告** —— 我们根本不导入它们，报冲突只会淹没真正的问题
+- 文件里只有非安全头时明确报错，并提示 `--all` 的出路
+- 确实要全量导入用 `--all`，此时冲突会如实报出来
+
+`SECURITY_HEADERS` 是一份显式清单。真实语料测试里有一条元测试：
+**语料中出现的每一个头，要么在清单里、要么在"刻意排除"清单里** ——
+不允许有"没考虑过"的漏网。
 
 ### 验收标准：往返一致
 
@@ -136,6 +169,24 @@ $ npm run roundtrip
 ```
 
 CI 每次都会跑它 —— 生成器或解析器任何一侧改坏转义，都会当场红。
+
+### 已对真实站点验证过
+
+不只是模拟器里跑通。用本站点自己的线上 `_headers` 做过一次完整闭环：
+
+```bash
+node src/index.mjs import --from ../Frank2673.github.io/_headers --out headers.policy.json   # 导入线上配置
+node src/index.mjs generate --policy headers.policy.json --out dist                           # 重新生成
+```
+
+**结果：生成的 `_headers` 与线上正在服务的那一份逐字节完全一致。**
+即 `import → 改名 → generate → 发布` 这条路径与当前线上状态等价 ——
+反向导入没有丢失任何东西，`generate` 也是确定性的。
+
+（这次比对顺带抓出一个真 bug：Cloudflare Pages 与 Netlify 都输出 `_headers`，
+原来会写进同一个路径，**谁后写谁生效**。线上那份的注释块因此取决于生成器遍历顺序。
+现在 `planOutputPaths()` 显式决定落点：第二份同名产物进自己的子目录，
+CI 里有一条断言"五个落点两两不同"。）
 
 ## CSP 顾问：既严格，又不打坏站点
 

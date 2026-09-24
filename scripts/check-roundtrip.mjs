@@ -60,7 +60,9 @@ export function checkRoundTrip(policy) {
 
   for (const artifact of generateAll(policy)) {
     const format = FORMAT_BY_GENERATOR[artifact.id];
-    const imported = importConfig(artifact.content, { format, filename: artifact.filename });
+    /* 往返测的是"生成器与解析器是否严格对称"，因此导入全部头；
+       默认的 security 过滤是产品层面的取舍，不该掺进这条不变式。 */
+    const imported = importConfig(artifact.content, { format, filename: artifact.filename, include: 'all' });
 
     const entry = { id: artifact.id, format, ok: false };
     results.push(entry);
