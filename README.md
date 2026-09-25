@@ -241,6 +241,39 @@ $ node src/index.mjs advise --html index.html --check headers.policy.json
 
 放进 CI，就能在「改了内联脚本忘了更新 CSP」的当天拦住它。
 
+## 下发到 Cloudflare（dry-run 默认 + 快照回滚）
+
+生成的 `_headers` 要生效得先部署。如果你想让策略**绕过手工粘贴**直接落到线上，
+可以用 `src/deploy/cloudflare.mjs`（同样零依赖）：
+
+```bash
+# ① 自检令牌（只读，不改任何东西）
+$ node src/deploy/cloudflare.mjs --verify-token
+  令牌：cf*** (sha256:b303814744da) · 长度 45 · 格式 scannable
+✅ 令牌有效（status=active）。
+
+# ② 预演：打印将要发出的每个请求，一个都不发（默认行为）
+$ node src/deploy/cloudflare.mjs --zone <zone-id 或域名>
+
+# ③ 真下发：先 GET 现状存快照，再 PUT 覆盖
+$ node src/deploy/cloudflare.mjs --zone <zone-id 或域名> --apply
+  📸 变更前快照：tmp/cloudflare-deploy/cf-ruleset-before-2026-09-25T04-10-36-664Z.json
+  ✅ 下发完成。规则：2 条 → 3 条
+  回滚命令：node src/deploy/cloudflare.mjs --zone <zone-id> --rollback "…" --apply
+```
+
+四条硬规则，每一条都是被真实故障逼出来的：
+
+| 规则 | 原因 |
+|---|---|
+| **默认 dry-run**，`--apply` 才真发 | 手工粘贴翻车的代价是线上防护**静默降级**，要等下一轮校验才发现 |
+| **写前必存快照**，`--rollback` 一键还原 | 没有快照的一次全量覆盖是不可回滚的 |
+| **只替换 `header-forge:` 前缀的规则** | 这个 phase 的 entrypoint 里可能还有别人建的规则；全量覆盖 = 删掉它们，且没有任何提示 |
+| **令牌只从 `CLOUDFLARE_API_TOKEN` 读** | 命令行传参会进 shell 历史与进程列表；输出只留前 2 位 + sha256 短哈希，永不落盘 |
+
+令牌权限怎么配、`9106` / `6111` / `10000` / `403` 分别是什么意思、怎么回滚，
+见 **[docs/cloudflare-deploy.md](docs/cloudflare-deploy.md)**。
+
 ## 命令行参考
 
 | 子命令 | 作用 | 退出码 |
@@ -250,6 +283,10 @@ $ node src/index.mjs advise --html index.html --check headers.policy.json
 | `verify` | 校验线上响应头是否与策略一致 | 0 一致 / 1 不一致 / 2 错误 |
 | `advise` | 分析页面并给出 CSP 建议 | 0 成功 / 1 hash 漂移 / 2 错误 |
 | `simulate` | 用生成的配置起服务并自校验 | 0 一致 / 1 不一致 / 2 错误 |
+
+> Cloudflare Transform Rules 的下发是**独立脚本**（不是 `index.mjs` 的子命令）：
+> `node src/deploy/cloudflare.mjs --zone <zone-id|域名>` —— 默认 dry-run，`--apply` 才真发。
+> 见 [docs/cloudflare-deploy.md](docs/cloudflare-deploy.md)。
 
 通用参数：`--policy <路径>`、`--out <目录/文件>`；各子命令另有 `--url`、`--html`、`--config`、`--only`、`--port`、`--check`、`--from`、`--format`、`--force`、`--stdout`。
 完整说明：`node src/index.mjs --help`
@@ -316,7 +353,7 @@ jobs:
 ## 路线图
 
 - [x] 支持读取已有 `_headers` / `vercel.json` / nginx / Caddyfile 做**反向导入**（含往返一致性守卫）
-- [ ] 支持 Cloudflare Transform Rules API 直接下发（省去手工粘贴）
+- [x] 支持 Cloudflare Transform Rules API 直接下发（省去手工粘贴）—— 默认 dry-run、写前存快照、可一键回滚（[docs/cloudflare-deploy.md](docs/cloudflare-deploy.md)）
 - [ ] 增加 `--paths` 批量校验多个 URL
 - [ ] 输出 SARIF，接入 GitHub Code Scanning
 - [x] 增加 Apache `.htaccess` 生成器（含反向导入）
