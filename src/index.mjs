@@ -10,6 +10,9 @@
  *   simulate  用生成的配置文件起本地服务并自校验（证明配置有效）
  *
  * 退出码：0 = 通过；1 = 校验不一致/现状不合规（可作 CI 门禁）；2 = 运行错误
+ *   verify --paths 批量形态沿用同一语义：0 = 全部一致 / 1 = 存在不一致 /
+ *   2 = 参数或运行错误（含任一地址拉取失败 —— 拉不到响应时"不知道合不合规"，
+ *   不能算成"不一致"，否则会把"没测到"说成"测出来不合规"）。
  *
  * @module index
  */
@@ -23,6 +26,17 @@ import { verifyUrl } from './verify.mjs';
 import { analyzePage, suggestCsp, checkHashDrift } from './advise.mjs';
 import { startSimulator } from './simulate.mjs';
 import { renderMarkdown, renderJson, renderSummary } from './lib/report.mjs';
+import {
+  collectPathEntries,
+  resolveTargets,
+  classifyVerifyResult,
+  summarizeBatch,
+  exitCodeForBatch,
+  renderBatchMarkdown,
+  renderBatchJson,
+  renderBatchSummary,
+} from './lib/batch.mjs';
+import { entryFromSingle, collectProblems, toSarif, validateSarif, renderSarifSummary } from './lib/sarif.mjs';
 import { request } from './lib/http.mjs';
 
 const VERSION = '0.1.0';
@@ -61,6 +75,21 @@ import 选项：
 
 verify 选项：
   --url <地址>        校验地址（默认取策略中第一个 target）
+                      配合 --paths 时它只作为**基准地址**，不再单独校验一次
+  --paths <列表>      批量校验多个地址。三种写法可混用、可重复给出（按顺序累加）：
+                        --paths /,/admin,/api/v1     逗号（或换行）分隔
+                        --paths @paths.txt           从文件读：一行一条，# 开头为注释
+                        --paths https://a.example/x  完整 URL 原样使用，不受基准影响
+                      相对路径会拼到基准地址之后。输出逐条结果 + 汇总，
+                      退出码：0 全部一致 / 1 存在不一致 / 2 参数或运行错误（含拉取失败）
+  --sarif <路径>      额外输出 SARIF 2.1.0（给 GitHub Code Scanning 用）
+                      挂在 verify 上：它产出的"缺失/值不符"就是代码扫描要报的问题。
+                      ruleId = header-forge/<状态>/<头名>（不含 URL）；
+                      partialFingerprints = sha256(状态|URL|头名)，跨运行恒定，
+                      所以同一个问题不会每跑一次 CI 就新开一条告警。
+                      只有 missing/mismatch 进 SARIF；extra 头与拉取失败不上报
+                      （前者不是违规、后者是"没测到"，都由退出码与报告表达）。
+                      写完会自检（可解析 + 必填字段 + 结果数），自检失败退出码 2
 
 advise 选项：
   --url <地址>        要分析的页面地址
@@ -76,13 +105,14 @@ simulate 选项：
   node src/index.mjs import --from public/_headers
   node src/index.mjs import --from nginx.conf --format nginx --stdout
   node src/index.mjs verify --policy headers.policy.json
+  node src/index.mjs verify --url https://example.com --paths /,/admin,/api --out out
   node src/index.mjs simulate --config dist/_headers --policy headers.policy.json
 `.trim();
 
 function parseArgs(argv) {
   const args = { _: [] };
   const takesValue = new Set([
-    '--policy', '--out', '--url', '--html', '--config', '--only', '--port', '--check', '--from', '--format',
+    '--policy', '--out', '--url', '--html', '--config', '--only', '--port', '--check', '--from', '--format', '--paths', '--sarif',
   ]);
 
   for (let i = 0; i < argv.length; i++) {
@@ -90,7 +120,13 @@ function parseArgs(argv) {
     if (takesValue.has(token)) {
       const value = argv[i + 1];
       if (!value || value.startsWith('--')) throw new Error(`${token} 需要一个值`);
-      args[token.slice(2)] = value;
+      if (token === '--paths') {
+        /* 可重复给出：累加成数组（单个 --paths 内部还可用逗号/换行再分） */
+        if (!Array.isArray(args.paths)) args.paths = [];
+        args.paths.push(value);
+      } else {
+        args[token.slice(2)] = value;
+      }
       i++;
     } else if (token.startsWith('--')) {
       args[token.slice(2)] = true;
@@ -279,6 +315,11 @@ async function cmdVerify(args) {
   const outDir = args.out || 'out';
   const policy = loadPolicy(policyPath);
 
+  /* --paths：批量形态。给了它就不再单独校验 --url（那时 --url 只是基准） */
+  if (args.paths) {
+    return cmdVerifyMany(args, { policy, policyPath, outDir });
+  }
+
   const url = args.url || firstTarget(policy);
   if (!url) {
     throw new Error('未指定 --url，且策略中没有 targets 可用于推断地址');
@@ -317,8 +358,119 @@ async function cmdVerify(args) {
   console.log('');
   console.log(`📄 报告：${join(outDir, 'conformance.md')}`);
 
+  if (args.sarif) {
+    const entries = [entryFromSingle({ url, results: result.results, meta: result.meta })];
+    const sarifCode = emitSarif({ sarifPath: args.sarif, entries, policyPath });
+    if (sarifCode !== null) return sarifCode;
+  }
+
   const nonCompliant = result.results.some((r) => r.status === 'missing' || r.status === 'mismatch');
   return nonCompliant ? 1 : 0;
+}
+
+/**
+ * 写 SARIF 并当场自检
+ *
+ * 自检三件事（任一不过就退出码 2，而不是交出一个可能被 GitHub 拒绝的文件）：
+ *   1. 文件能被 JSON.parse 回来（不是写了一半的残缺文件）
+ *   2. 必填字段与 level/ruleId/指纹齐全（validateSarif）
+ *   3. **结果数 = 输入的问题数**（不吞问题、不重复上报）
+ *
+ * @returns {number|null} null = 通过；2 = 自检失败
+ */
+function emitSarif({ sarifPath, entries, policyPath }) {
+  const sarif = toSarif({
+    entries,
+    policyPath,
+    version: VERSION,
+    startedAt: new Date().toISOString(),
+  });
+
+  mkdirSync(dirname(sarifPath), { recursive: true });
+  writeFileSync(sarifPath, JSON.stringify(sarif, null, 2) + '\n', 'utf8');
+
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(sarifPath, 'utf8'));
+  } catch (err) {
+    console.error(`🛑 SARIF 自检失败：写出的文件不是合法 JSON（${err.message}）`);
+    return 2;
+  }
+
+  const expected = collectProblems(entries).length;
+  const actual = parsed.runs && parsed.runs[0] ? parsed.runs[0].results.length : -1;
+  const { ok, problems } = validateSarif(parsed);
+
+  if (!ok || expected !== actual) {
+    console.error('🛑 SARIF 自检失败（不输出未经校验的扫描结果）：');
+    for (const p of problems) console.error(`   - ${p}`);
+    if (expected !== actual) {
+      console.error(`   - 结果数与输入问题数不一致：输入 ${expected} 条 / 输出 ${actual} 条`);
+    }
+    return 2;
+  }
+
+  console.log('');
+  console.log(renderSarifSummary({ path: sarifPath, sarif: parsed, expectedProblems: expected }));
+  return null;
+}
+
+/**
+ * 批量校验（`--paths`）
+ *
+ * 和单 URL 形态共用同一个校验器 `verifyUrl` —— 差别只在"校验几个地址"
+ * 与"退出码怎么归总"，比对逻辑一行都没有分叉。
+ *
+ * 串行执行（不并发）：报告顺序必须与输入顺序一致且可复现，
+ * 而且对同一个站点同时打几十个请求本身就会触发对方的限流。
+ */
+async function cmdVerifyMany(args, { policy, policyPath, outDir }) {
+  const base = args.url || firstTarget(policy);
+
+  const targets = resolveTargets(collectPathEntries(args.paths), base);
+  const startedAt = new Date().toISOString();
+
+  const entries = [];
+  for (const target of targets) {
+    const result = await verifyUrl(policy, target.url);
+    const classified = classifyVerifyResult(result);
+    entries.push({
+      ...target,
+      status: classified.status,
+      error: classified.error,
+      summary: classified.summary,
+      results: result.results || [],
+      statusCode: result.meta ? result.meta.status : null,
+      finalUrl: result.meta ? result.meta.finalUrl : null,
+      ms: result.meta ? result.meta.ms : null,
+    });
+  }
+
+  console.log(renderBatchSummary({ entries, base }));
+
+  const meta = { version: VERSION, startedAt, policyPath };
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(
+    join(outDir, 'conformance.md'),
+    renderBatchMarkdown({ policy, entries, base, meta }),
+    'utf8'
+  );
+  writeFileSync(
+    join(outDir, 'conformance.json'),
+    JSON.stringify(renderBatchJson({ policy, entries, base, meta }), null, 2),
+    'utf8'
+  );
+
+  console.log('');
+  console.log(`📄 报告：${join(outDir, 'conformance.md')}`);
+
+  if (args.sarif) {
+    const sarifCode = emitSarif({ sarifPath: args.sarif, entries, policyPath });
+    if (sarifCode !== null) return sarifCode;
+  }
+
+  const summary = summarizeBatch(entries);
+  return exitCodeForBatch(summary);
 }
 
 /**

@@ -290,8 +290,65 @@ $ node src/deploy/cloudflare.mjs --zone <zone-id 或域名> --apply
 > `node src/deploy/cloudflare.mjs --zone <zone-id|域名>` —— 默认 dry-run，`--apply` 才真发。
 > 见 [docs/cloudflare-deploy.md](docs/cloudflare-deploy.md)。
 
-通用参数：`--policy <路径>`、`--out <目录/文件>`；各子命令另有 `--url`、`--html`、`--config`、`--only`、`--port`、`--check`、`--from`、`--format`、`--force`、`--stdout`。
+通用参数：`--policy <路径>`、`--out <目录/文件>`；各子命令另有 `--url`、`--paths`、`--sarif`、`--html`、`--config`、`--only`、`--port`、`--check`、`--from`、`--format`、`--force`、`--stdout`。
 完整说明：`node src/index.mjs --help`
+
+### 一次校验多个地址（`--paths`）
+
+只校验 `/` 会得出"站点已合规"的错误结论 —— 真实站点经常是根路径一套、后台/API/下载路径另一套。
+`verify --paths` 逐条校验并给出汇总：
+
+```bash
+# 逗号分隔（也接受换行分隔）
+node src/index.mjs verify --url https://example.com --paths /,/admin,/api/v1
+
+# 空行与 # 注释会被忽略，适合把清单签进仓库
+node src/index.mjs verify --url https://example.com --paths @paths.txt
+
+# 完整 URL 原样使用，不受基准地址影响（两种写法可混用）
+node src/index.mjs verify --paths @paths.txt,https://other.example/x
+```
+
+- `--url` 在批量模式下只作为**基准地址**（相对路径拼到它之后），不再单独校验一次；不给基准时相对路径会直接报错（退出码 2），而不是猜一个地址
+- 输出：逐条结果（一致 / 不一致 + 缺哪个头 / 拉取失败）+ 一行汇总
+- **退出码**：`0` 全部一致 · `1` 存在不一致 · `2` 参数或运行错误（含任一地址拉取失败）
+- 拉取失败**不算"不一致"**：拿不到响应时我们并不知道合规不合规，报 1 会把"没测到"说成"测出来不合规"
+- 串行执行：报告顺序与输入顺序一致（可复现），也避免把对方站点打出限流
+
+### 输出 SARIF（接入 GitHub Code Scanning）
+
+`verify` 加 `--sarif <路径>` 会额外产出一份 SARIF 2.1.0，可直接上传到 Code Scanning：
+
+```bash
+node src/index.mjs verify --policy headers.policy.json --out out --sarif out/results.sarif
+```
+
+```yaml
+permissions:
+  contents: read
+  security-events: write   # 上传 SARIF 需要
+
+steps:
+  - run: node src/index.mjs verify --policy headers.policy.json --out out --sarif out/results.sarif
+    continue-on-error: true          # 先让 SARIF 落盘，再由下一步上传
+  - uses: github/codeql-action/upload-sarif@v3
+    with:
+      sarif_file: out/results.sarif
+      category: header-forge
+```
+
+设计取舍（每一条都直接影响面板好不好用）：
+
+| 决策 | 具体做法 | 原因 |
+|---|---|---|
+| 哪些问题上报 | 只报 `missing`（策略要求但线上没有）与 `mismatch`（取值被放宽） | `extra` 头是"策略未声明"而不是违规，而站点几乎总有 `Server`/`X-Powered-By` 这类头 —— 报进去就是永远关不掉的噪音；拉取失败属于"没测到"，由退出码 2 表达，不该在面板里伪装成安全告警。两者都保留在 JSON/Markdown 报告与 SARIF 的 `run.properties` 里 |
+| level 映射 | `critical`/`high` → `error`，`medium` → `warning`，`low`/`info` → `note` | 与策略里声明的 severity 一致 —— 只改 `headers.policy.json` 就能改变面板上的分级 |
+| `ruleId` 命名 | `header-forge/<状态>/<头名>`，例 `header-forge/missing/referrer-policy`，**不含 URL** | 含 URL 的话同一类问题在 10 个路径上就是 10 条规则，面板会被刷爆；`missing` 与 `mismatch` 是两类问题，分开才能分别统计 |
+| `partialFingerprints` | `sha256(状态 \| URL \| 头名)`，**不含实际值、期望值、时间戳** | 这是去重键：站点把 `max-age` 从 600 改成 300 时问题仍是"同一个问题"，指纹必须不变 —— 否则每跑一次 CI 就新开一条告警，旧的那条永远悬着 |
+| 告警位置 | 指向策略文件（`artifactLocation.uri` = `--policy` 的值），URL 保留在 `message`／`properties` | 远端 URL 不是仓库内文件；要修的是策略或部署配置，落在策略文件上最接近"该改哪儿" |
+
+写完会当场自检：JSON 可解析、必填字段与 `level`/`ruleId`/指纹齐全、**结果数 = 输入问题数**；
+自检不过退出码 2（不交出未经校验的扫描结果）。
 
 ## 用在你自己的仓库里
 
@@ -334,7 +391,7 @@ jobs:
 |---|---|
 | **零依赖** | 只用 Node 内置模块（`crypto`/`https`/`http`），CI 里无需 `npm install`，供应链面为零 |
 | **拒绝 `unsafe-inline`（script-src）** | 策略校验会直接拒绝它；确需放行必须改用 hash 或在 `why` 中明确说明 |
-| **配置注入防护** | 策略值会被渲染进 nginx/caddy 语法，含换行/制表符的值一律拒绝（否则一个换行就能注入任意指令） |
+| **配置注入防护覆盖每一个渲染字段** | 策略值会被渲染进 nginx/caddy 语法，含换行/制表符的值一律拒绝；`remove` 的名字同样会进配置语法（caddy 的 `-Name` 是裸渲染），所以它必须过与头部名同源的 RFC 7230 token 校验 —— 曾经漏了这一处，一个带换行的 `remove` 就能注入任意指令（策略层 + 生成器各一道，缺一不可） |
 | **`.htaccess` 默认 `always set` + `<IfModule>` 守卫** | 错误响应也要有防护（`Header set` 只覆盖 2xx）；缺 mod_headers 时没守卫会让整站 500。代价是"不生效不报错"，所以要求部署后用 `verify` 复验 |
 | **校验允许"更强"** | HSTS 的 max-age 更大、CSP 有额外指令都算通过 —— 否则工具天天误报，最后没人看 |
 | **模拟器解析真实产物** | 只验证策略对象是自欺欺人；必须验证"生成出来的东西" |
@@ -343,7 +400,7 @@ jobs:
 ## 局限
 
 - 生成的配置需要**由你部署到对应平台**才会生效；本工具不替你部署
-- `verify` 校验的是「单个 URL 的响应头」；若站点按路径设置不同头，需要对每个路径分别校验
+- `verify` 默认校验**单个 URL**；要覆盖按路径分别设置的头，用 `--paths`（批量形态）把路径列全 —— 工具不会替你去发现有哪些路径，`paths.txt` 需要你自己维护
 - 反向导入**只能恢复"名字与取值"**：`severity`/`why` 是人的判断，配置里没有；策略模型一个头只有一个取值，多路径块或多条 `source` 规则会被合并（合并时给出警告）
 - nginx 的 `location` 嵌套、Caddy 的匹配器等结构信息在策略模型里表达不了，导入时只反映"文件里写了哪些头"
 - Apache `.htaccess` 是**文件级**配置，多两个静默失效点：需要站点已加载 `mod_headers`，且允许覆盖（主配置 `AllowOverride FileInfo` —— `Header` 指令的 Override 类别），否则整块配置不生效、通常也不报错。模拟器能证明"产物里的取值与结构正确"，但**验证不了你的 Apache 是否真的加载了模块、是否允许覆盖** —— 部署后请用 `verify` 对线上实测
@@ -351,13 +408,17 @@ jobs:
 - `Header always unset Server` 在部分配置下不生效（`Server` 由 core 生成），更可靠的是主配置里的 `ServerTokens` / `ServerSignature` —— 那属于主配置，本工具生成不了
 - CSP 顾问基于静态 HTML 分析：运行时才加载的脚本、动态创建的 iframe 等无法预知，仍建议先上 Report-Only
 - 不处理 DNS 层面的问题（如 DMARC 记录）—— 那是 surface-watch 的领域，且需要自有域名
+- `--paths` 批量校验是**串行**的：地址很多时慢，也没有并发上限控制（取舍是报告顺序可复现、且不会给对方站点造成突发并发）
+- SARIF 里的告警位置固定指向策略文件：GitHub Code Scanning 需要"仓库内的位置"，而响应头不符的根因可能在部署配置（`_headers` / nginx / CDN 控制台）—— 面板上的文件位置只是入口，`message` 里带了具体 URL
+- SARIF 只上报 `missing` 与 `mismatch`：`extra` 头与"拉取失败"不进面板（理由见上文表格），它们只在报告与 `run.properties` 里
+- 本仓库的 CI 目前**没有**把 `--sarif` 接进自己的工作流（`verify` 仍按退出码门禁）；要启用只需按上文 YAML 给 `conformance.yml` 加 `security-events: write` 与 `upload-sarif` 两步
 
 ## 路线图
 
 - [x] 支持读取已有 `_headers` / `vercel.json` / nginx / Caddyfile 做**反向导入**（含往返一致性守卫）
 - [x] 支持 Cloudflare Transform Rules API 直接下发（省去手工粘贴）—— 默认 dry-run、写前存快照、可一键回滚（[docs/cloudflare-deploy.md](docs/cloudflare-deploy.md)）
-- [ ] 增加 `--paths` 批量校验多个 URL
-- [ ] 输出 SARIF，接入 GitHub Code Scanning
+- [x] 增加 `--paths` 批量校验多个 URL（含 `@文件` 清单、汇总、退出码语义；见上文）
+- [x] 输出 SARIF，接入 GitHub Code Scanning（`verify --sarif <路径>`；见上文的设计取舍表）
 - [x] 增加 Apache `.htaccess` 生成器（含反向导入）
 
 ## 许可
