@@ -5,7 +5,7 @@
 [![CI](https://github.com/Frank2673/header-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/Frank2673/header-forge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![零依赖](https://img.shields.io/badge/运行时依赖-0-brightgreen)
-![测试](https://img.shields.io/badge/测试-204%20passed-brightgreen)
+![测试](https://img.shields.io/badge/测试-256%20passed-brightgreen)
 
 **安全响应头配置即代码** —— 一次声明，多平台生成，线上校验，本地可证。
 支持从现有配置**反向导入**（接管别人的项目），并以往返一致性守卫保证生成与解析严格对称。
