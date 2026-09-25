@@ -272,20 +272,21 @@ test('第二道：绕过策略层直接调用生成器，值含换行同样被�
   assert.throws(() => generate(raw), /会被注入进 \.htaccess 的指令语法，拒绝渲染/);
 });
 
-test('第三道：remove 项含换行也被拒 —— 策略层不校验这个字段', () => {
+test('第二道：绕过策略层直接调用生成器，remove 项含换行同样被拒（不是死代码）', () => {
   const raw = {
     headers: { 'X-Content-Type-Options': { name: 'X-Content-Type-Options', value: 'nosniff' } },
-    /* lib/policy.mjs 对 remove 只做 Array.isArray 判断，不校验条目 —— 直接渲染就是注入 */
+    /* 直接调生成器就绕过了 lib/policy.mjs 的第一道校验 —— 这道断言必须自己拦住 */
     remove: ['X-Powered-By\n</IfModule>\nHeader always set X-Injected: yes'],
   };
 
   assert.throws(() => generate(raw), /remove 里的.*不是合法的响应头名/);
 });
 
-test('策略层的 remove 校验缺口是真实可达的（本生成器拒绝，但解析层放行）', () => {
-  /* 记录这条缺口的可复现证据：loadPolicy 对这样的 remove 不报错，
-     因此"直接渲染 remove 的生成器"会成为注入面 —— 本生成器已自行拦截。 */
-  const policy = validatePolicy({
+test('策略层的 remove 校验缺口已堵上（同一份策略现在在策略层就被拒绝）', () => {
+  /* 历史：策略层一度只对 remove 做 Array.isArray 判断、不校验条目，
+     于是"直接渲染 remove 的生成器"（caddy 的 `-Name`）成为注入面。
+     现在两层都拒绝：策略层先拒（覆盖所有渲染点），生成器再断言一次。 */
+  const pwned = {
     version: 1,
     headers: {
       'Strict-Transport-Security': { value: 'max-age=31536000; includeSubDomains' },
@@ -294,10 +295,16 @@ test('策略层的 remove 校验缺口是真实可达的（本生成器拒绝，
       'Referrer-Policy': { value: 'strict-origin-when-cross-origin' },
     },
     remove: ['X-A\nHeader always set X-Injected "1"'],
-  });
+  };
 
-  assert.equal(policy.remove.length, 1, '策略层确实没有拦住这一项');
-  assert.throws(() => generate(policy), /拒绝渲染/, '生成器必须自己拦住');
+  assert.throws(
+    () => validatePolicy(pwned),
+    /remove 里的.*会被注入进生成的配置语法/,
+    '策略层必须自己拦住，而不是依赖某个生成器恰好也校验了'
+  );
+
+  /* 生成器侧的第二道断言独立于策略层，仍然生效 */
+  assert.throws(() => generate({ ...pwned, headers: { 'X-A': { name: 'X-A', value: '1' } } }), /拒绝渲染/);
 });
 
 /* ------------------------- 模拟器接入 ------------------------- */

@@ -18,20 +18,18 @@
  *    需保证两边取值一致（`set` 替换同名头，但不同表在部分配置下可能产生重复值）。
  *
  * 安全要点与 nginx / caddy 一致：值会被渲染进配置语法，所以必须转义 `\` 与 `"`。
- * 策略层的注入防护（拒绝含换行/制表符的值）是第一道关，这个模块再加一道断言 ——
- * 因为策略层的 `remove` 数组**没有**做同样的校验，直接渲染就是配置注入。
+ * 策略层的注入防护（拒绝含换行/制表符的值与非法 `remove` 名字）是第一道关，
+ * 这个模块再加一道断言 —— 因为绕过策略层直接调用生成器是可能的，
+ * 而"某个渲染点漏了校验"就等于整条防线没堵住。
  *
  * @module generators/htaccess
  */
 
-import { canonicalHeaderName } from '../lib/policy.mjs';
+import { canonicalHeaderName, isSafeHeaderName } from '../lib/policy.mjs';
 
 export const id = 'htaccess';
 export const label = 'Apache .htaccess';
 export const filename = '.htaccess';
-
-/** 头部名 token 规则（与 lib/policy.mjs 的 TOKEN_RE 同规则） */
-const TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
 /** 会破坏配置语法的控制字符：换行/回车/制表/空字节 */
 const INJECTION_RE = /[\r\n\t\0]/;
@@ -144,11 +142,12 @@ export function generate(policy) {
     lines.push(`  Header always set ${header.name} "${escapeApacheValue(header.value)}"`);
   }
 
-  /* remove 列表：策略层没有校验它，所以这里逐个过 token 规则 ——
-     直接渲染 `Header always unset ${名字}` 的话，一个换行就能注入任意指令。 */
+  /* remove 列表：直接用 `Header always unset ${名字}`，所以逐个过 token 规则 ——
+     一个换行就能注入任意指令。判据与策略层共用（lib/policy.mjs 的 isSafeHeaderName），
+     避免两处各写一份正则而悄悄分叉。 */
   const unsetNames = [];
   for (const name of policy.remove || []) {
-    if (!TOKEN_RE.test(String(name))) {
+    if (!isSafeHeaderName(String(name))) {
       throw new Error(
         `remove 里的「${String(name).replace(/[\r\n\t\0]/g, '␍')}」不是合法的响应头名 —— ` +
           '会被注入进 .htaccess 的指令语法，拒绝渲染'

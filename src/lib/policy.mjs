@@ -4,10 +4,14 @@
  * 「策略即代码」的关键不只是"把配置写成文件"，而是**让策略本身可被审查**：
  *   1. 结构性校验（字段、取值、头部名合法性）
  *   2. 安全基线校验（该有的头必须有，弱值必须被拒）
- *   3. 配置注入防护（值里不许出现换行等可逃逸出配置语法的字符）
+ *   3. 配置注入防护（值与 `remove` 名字里都不许出现换行等可逃逸出配置语法的字符）
  *
  * 第 3 点很重要：策略文件会被渲染进 nginx / caddy 等配置语法里，
  * 一个带换行的值就能把配置注入成任意指令。
+ *
+ * 注入防护必须**覆盖每一个会被渲染的字段**：`headers.*.value` 与 `remove[]`
+ * 都会进配置语法，只守住前者等于没守住 —— 后者的缺口曾经让一个带换行的
+ * `remove` 条目直接注入出任意 caddy 指令（详见 isSafeHeaderName 的注释）。
  *
  * @module lib/policy
  */
@@ -27,6 +31,33 @@ const TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
 /** 危险字符：换行/回车/制表等会破坏生成的配置语法（注入面） */
 const INJECTION_RE = /[\r\n\t\0]/;
+
+/**
+ * 响应头名是否安全到可以渲染进配置语法
+ *
+ * 判据就是 RFC 7230 的 token 规则 —— 它天然排除空白、换行、制表符、NUL，
+ * 以及 `}` `"` `;` `#` 之类能在配置语法里"逃逸出去"的字符。
+ *
+ * 为什么单独导出：**头部名不只有 headers 的键，还有 `remove` 列表**。
+ * 两处都会进配置语法（caddy 的 `-Name`、.htaccess 的 `Header always unset Name`），
+ * 所以必须共用同一条判据 —— 只在生成器里各写一份正则，就会漏掉其中一处。
+ *
+ * @param {unknown} name
+ * @returns {boolean}
+ */
+export function isSafeHeaderName(name) {
+  return typeof name === 'string' && TOKEN_RE.test(name);
+}
+
+/** 把不可见字符换成可见记号，便于错误信息里定位 */
+function showControlChars(value) {
+  return String(value).replace(/[\r\n\t\0]/g, (ch) => {
+    if (ch === '\r') return '␍';
+    if (ch === '\n') return '␊';
+    if (ch === '\t') return '␉';
+    return '␀';
+  });
+}
 
 /** 允许的严重度 */
 const SEVERITIES = ['info', 'low', 'medium', 'high', 'critical'];
@@ -109,7 +140,9 @@ export function loadPolicy(filePath) {
  * 那正是要展示给用户的差距，而不是一个该炸掉的错误。
  *
  * @param {object} policy
- * @returns {{normalized: object, problems: string[]}}
+ * @returns {{normalized: object, problems: string[], remove: string[]}}
+ *   `remove` 是**已通过 token 校验**的删除指令列表（非法项被剔除并记入 problems）；
+ *   调用方应使用它而不是原对象里的 `policy.remove`。
  */
 export function collectPolicyProblems(policy) {
   if (!policy || typeof policy !== 'object') {
@@ -168,6 +201,31 @@ export function collectPolicyProblems(policy) {
     };
   }
 
+  /* ---- remove 列表（删除指令）----
+     remove 不是"内部数据结构"，它同样会被渲染进配置语法：
+       caddy  →  `-X-Powered-By`
+       htaccess → `Header always unset X-Powered-By`
+     所以每一项都必须过与头部名同源的 token 校验。这里曾经是缺口：
+     值做了注入防护、remove 没做，于是一个带换行的 remove 条目就能
+     关掉 header 块并注入任意指令（`generate --only caddy` 可直接落盘）。
+     校验放在这一层而不是只放生成器里 —— 因为渲染点不止一个，
+     漏掉任何一个渲染点都等于没堵住。 */
+  const remove = [];
+  if (policy.remove !== undefined && !Array.isArray(policy.remove)) {
+    problems.push('remove 必须是数组（每项是一个要删除的响应头名）');
+  } else {
+    for (const entry of policy.remove || []) {
+      if (!isSafeHeaderName(entry)) {
+        problems.push(
+          `remove 里的「${showControlChars(entry)}」不是合法的响应头名（只允许 RFC 7230 token 字符）` +
+            ` —— 会被注入进生成的配置语法，拒绝接受`
+        );
+        continue;
+      }
+      if (!remove.includes(entry)) remove.push(entry);
+    }
+  }
+
   /* ---- 安全基线 ---- */
   for (const required of REQUIRED_HEADERS) {
     if (!normalized[required] && !rejected.has(required)) {
@@ -213,7 +271,7 @@ export function collectPolicyProblems(policy) {
     problems.push('X-Content-Type-Options 只能是 nosniff');
   }
 
-  return { normalized, problems };
+  return { normalized, problems, remove };
 }
 
 /**
@@ -223,7 +281,7 @@ export function collectPolicyProblems(policy) {
  * @returns {{version: number, targets: object, headers: object, remove: string[], raw: object}}
  */
 export function validatePolicy(policy) {
-  const { normalized, problems } = collectPolicyProblems(policy);
+  const { normalized, problems, remove } = collectPolicyProblems(policy);
 
   if (problems.length > 0) {
     throw new PolicyError(`策略校验失败：\n   - ${problems.join('\n   - ')}`);
@@ -233,7 +291,7 @@ export function validatePolicy(policy) {
     version: policy.version || 1,
     targets: policy.targets || {},
     headers: normalized,
-    remove: Array.isArray(policy.remove) ? policy.remove : [],
+    remove,
     raw: policy,
   };
 }
