@@ -86,12 +86,12 @@ test('指定了不支持的格式时报错并列出可选值', () => {
 
 /* ------------------------- 往返一致（核心） ------------------------- */
 
-test('**四种格式往返全部一致**（含双引号转义）', () => {
+test('**五种格式往返全部一致**（含双引号转义）', () => {
   const policy = testPolicy();
   const expected = expectedMap(policy);
   const artifacts = generateAll(policy);
 
-  assert.equal(artifacts.length, 5, '五种平台产物');
+  assert.equal(artifacts.length, 6, '六个平台产物');
 
   /* 逐个产物导入回来比对名字与取值。
      这里显式 include: 'all' —— 往返测的是"生成器与解析器严格对称"，
@@ -101,6 +101,7 @@ test('**四种格式往返全部一致**（含双引号转义）', () => {
     const format = artifact.id === 'vercel' ? 'vercel'
       : artifact.id === 'nginx' ? 'nginx'
       : artifact.id === 'caddy' ? 'caddy'
+      : artifact.id === 'htaccess' ? 'htaccess'
       : 'headers';
 
     const r = importConfig(artifact.content, { format, filename: artifact.filename, include: 'all' });

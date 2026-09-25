@@ -15,6 +15,7 @@
 
 import http from 'node:http';
 import { parseHeadersFile, resolveHeadersForPath } from './generators/headers-file.mjs';
+import { parseApacheHtaccess } from './generators/htaccess.mjs';
 
 const DEMO_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -26,7 +27,8 @@ const DEMO_HTML = `<!DOCTYPE html>
 
 /**
  * 从生成的配置文件里解析出响应头
- * 支持两种产物：`_headers`（Cloudflare Pages / Netlify）与 `vercel.json`
+ * 支持三种产物：`_headers`（Cloudflare Pages / Netlify）、`vercel.json`、
+ * 以及 Apache `.htaccess`（mod_headers）
  *
  * @param {string} content 配置文件内容
  * @param {string} [path='/'] 用于路径匹配
@@ -46,7 +48,29 @@ export function parseGeneratedConfig(content, path = '/') {
     return out;
   }
 
+  if (looksLikeApacheConfig(text)) {
+    /* .htaccess 没有路径模式：它整块作用于所在目录。被 unset 的头不应出现在解析结果里
+       （它们不来自策略，但手写的 .htaccess 里可能有）。 */
+    const { headers, remove } = parseApacheHtaccess(text);
+    for (const name of remove) delete headers[name];
+    return headers;
+  }
+
   return resolveHeadersForPath(text, path);
+}
+
+/**
+ * 判断一段内容是不是 mod_headers 的 .htaccess 配置
+ *
+ * 放在"JSON 之后、`_headers` 之前"判断：`_headers` 的头部行是「名字: 值」，
+ * 而 .htaccess 是「Header set 名字 值」—— 两者形状不同，不会互相误判。
+ */
+export function looksLikeApacheConfig(text) {
+  const content = String(text || '');
+  return (
+    /^\s*<IfModule\s+mod_headers/im.test(content) ||
+    /^\s*Header\s+(?:always\s+|onsuccess\s+)?[A-Za-z][A-Za-z0-9*]*\s/m.test(content)
+  );
 }
 
 /**
@@ -86,9 +110,11 @@ export async function startSimulator(options) {
 /** 针对某个请求路径解析配置中的响应头 */
 export function parseHeadersForRequest(configText, url) {
   const text = String(configText || '').trim();
-  if (text.startsWith('{')) {
-    return parseGeneratedConfig(text, '/');
-  }
   const path = url === '/' ? '/' : String(url).split('?')[0];
+  /* vercel.json 与 .htaccess 都不按路径区分（.htaccess 整块作用于所在目录）；
+     只有 `_headers` 需要按请求路径合并路径块。 */
+  if (text.startsWith('{') || looksLikeApacheConfig(text)) {
+    return parseGeneratedConfig(text, path);
+  }
   return resolveHeadersForPath(text, path);
 }

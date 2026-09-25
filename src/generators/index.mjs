@@ -9,6 +9,7 @@ import * as netlify from './netlify.mjs';
 import * as vercel from './vercel.mjs';
 import * as nginx from './nginx.mjs';
 import * as caddy from './caddy.mjs';
+import * as htaccess from './htaccess.mjs';
 
 export const GENERATORS = {
   [cloudflarePages.id]: cloudflarePages,
@@ -16,6 +17,7 @@ export const GENERATORS = {
   [vercel.id]: vercel,
   [nginx.id]: nginx,
   [caddy.id]: caddy,
+  [htaccess.id]: htaccess,
 };
 
 export const GENERATOR_IDS = Object.keys(GENERATORS);
@@ -51,6 +53,10 @@ export { parseHeadersFile, resolveHeadersForPath, matchesPattern } from './heade
  * 规则：
  *   - nginx / caddy 与带路径的产物，一直放自己的子目录
  *   - 其余产物放 outDir 根下；**若该名字已被占用**，则放进自己的子目录并标记 disambiguated
+ *
+ * 特例：Apache 的 `.htaccess` 落在 outDir 根下 —— 它不是"某一家的托管配置"，
+ * 而必须与 index.html 同目录才对整个站点生效（进子目录就等于只对一个子路径生效）。
+ * 它与 `_headers` 不撞名，所以不会被消歧逻辑挪走。
  *
  * @param {string} outDir
  * @param {Array<{id:string,filename:string}>} artifacts

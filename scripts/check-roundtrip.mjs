@@ -24,6 +24,7 @@ const FORMAT_BY_GENERATOR = {
   vercel: 'vercel',
   nginx: 'nginx',
   caddy: 'caddy',
+  htaccess: 'htaccess',
 };
 
 /**
@@ -127,7 +128,8 @@ if (process.argv[1] && /check-roundtrip\.mjs$/.test(process.argv[1])) {
 
   console.log('');
   if (failures === 0) {
-    console.log('✅ 五种产物的往返一致性全部通过');
+    /* 数量从结果里取，避免登记新生成器时这里变成一句假话 */
+    console.log(`✅ ${results.length} 种产物的往返一致性全部通过`);
     process.exit(0);
   }
   console.error(`❌ ${failures} 种产物往返不一致 —— generate 与 import 之间存在不对称`);

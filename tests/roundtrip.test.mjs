@@ -17,12 +17,12 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /* ------------------------- 真实策略的往返 ------------------------- */
 
-test('仓库真实策略：五种产物往返全部一致', () => {
+test('仓库真实策略：六种产物往返全部一致', () => {
   const policy = loadPolicy(resolve(ROOT, 'headers.policy.json'));
   const { results, failures, expectedCount } = checkRoundTrip(policy);
 
   assert.ok(expectedCount >= 4, '策略应至少包含基线那几个头');
-  assert.equal(results.length, 5, '五个平台产物都要检查');
+  assert.equal(results.length, 6, '六个平台产物都要检查');
   assert.deepEqual(
     results.filter((r) => !r.ok),
     [],

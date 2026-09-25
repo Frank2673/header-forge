@@ -111,12 +111,12 @@ test('vercel 生成器产出合法 JSON 且结构正确', () => {
   assert.deepEqual(keys.sort(), ['Strict-Transport-Security', 'X-Content-Type-Options']);
 });
 
-test('generateAll 默认产出全部五个平台', () => {
+test('generateAll 默认产出全部六个平台', () => {
   const artifacts = generateAll(policy);
   assert.equal(artifacts.length, GENERATOR_IDS.length);
   assert.deepEqual(
     artifacts.map((a) => a.id).sort(),
-    ['caddy', 'cloudflare-pages', 'netlify', 'nginx', 'vercel']
+    ['caddy', 'cloudflare-pages', 'htaccess', 'netlify', 'nginx', 'vercel']
   );
 });
 

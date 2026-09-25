@@ -2,7 +2,8 @@
  * 反向导入：读现有配置 → 生成策略文件
  *
  * 场景是"接管别人的项目"：仓库里已经有一份 `_headers` / `vercel.json` /
- * nginx 片段 / Caddyfile，你想把它纳入「策略即代码」的管治，而不是从零重写。
+ * nginx 片段 / Caddyfile / Apache `.htaccess`，你想把它纳入「策略即代码」的管治，
+ * 而不是从零重写。
  *
  * 三个设计决定：
  *
@@ -21,9 +22,10 @@
 
 import { canonicalHeaderName, collectPolicyProblems } from './lib/policy.mjs';
 import { parseHeadersFile } from './generators/headers-file.mjs';
+import { parseApacheHtaccess } from './generators/htaccess.mjs';
 
 /** 支持的导入格式 */
-export const IMPORT_FORMATS = ['headers', 'vercel', 'nginx', 'caddy'];
+export const IMPORT_FORMATS = ['headers', 'vercel', 'nginx', 'caddy', 'htaccess'];
 
 /**
  * 本工具管治的响应头（安全类）
@@ -73,6 +75,7 @@ export function detectFormat(text, filename = '') {
   if (/(^|\/)Caddyfile/i.test(filename) || /caddyfile/i.test(name)) return 'caddy';
   if (/\.conf$/.test(name) || /nginx/i.test(name)) return 'nginx';
   if (/_headers$/.test(name) || /netlify|cloudflare/i.test(name)) return 'headers';
+  if (/\.?htaccess$/i.test(name)) return 'htaccess';
 
   /* 内容特征 */
   const trimmed = content.trim();
@@ -85,6 +88,14 @@ export function detectFormat(text, filename = '') {
     }
   }
   if (/^\s*add_header\s+/m.test(content)) return 'nginx';
+  /* mod_headers 的签名：`<IfModule mod_headers.c>` 外壳，或 `Header [always] set/unset <名>` 指令。
+     必须排在 _headers 的内容特征之前 —— .htaccess 里也有"缩进 + 指令"的形状。 */
+  if (
+    /^\s*<IfModule\s+mod_headers/i.test(content) ||
+    /^\s*Header\s+(?:always\s+|onsuccess\s+)?[A-Za-z][A-Za-z0-9*]*\s/m.test(content)
+  ) {
+    return 'htaccess';
+  }
   if (/^\s*header\s*\{/m.test(content) || /^\s*-[A-Za-z0-9-]+\s*$/m.test(content)) return 'caddy';
   if (/^\S.*$/m.test(content) && /^\s+[A-Za-z0-9-]+:\s*\S/m.test(content)) return 'headers';
 
@@ -229,6 +240,44 @@ export function parseNginxHeaders(text, keep) {
 }
 
 /**
+ * 解析 Apache `.htaccess` 的 Header 指令（mod_headers）
+ *
+ * 只认 `Header [always|onsuccess] set|...|unset <名字> [值]`。
+ * `<IfModule mod_headers.c>` 是标准外壳，不算结构；`<FilesMatch>` / `<Directory>` 这类
+ * 按路径限定的块在策略模型里表达不了，记入 warning（与 nginx 的 location 警告同义）。
+ */
+export function parseApacheHeaders(text, keep) {
+  const c = makeCollector(keep);
+  const parsed = parseApacheHtaccess(text);
+
+  for (const [name, value] of Object.entries(parsed.headers)) {
+    c.set(name, value, 'Header');
+  }
+  for (const name of parsed.remove) {
+    c.drop(name);
+  }
+  for (const s of parsed.skipped) {
+    c.skip(s.where, s.line);
+  }
+  for (const w of parsed.warnings) {
+    c.warnings.push(w);
+  }
+
+  if (parsed.scopes.length) {
+    c.warnings.push(
+      `文件里有 <${parsed.scopes.join('> / <')}> 结构块 —— 它们按目录/文件/URL 限定作用范围，` +
+        '策略模型表达不了这层结构；导入结果只反映"文件里写了哪些头"'
+    );
+  }
+
+  if (parsed.directives === 0) {
+    c.skip('(整个文件)', '没有找到 Header 指令');
+  }
+
+  return c;
+}
+
+/**
  * 解析 Caddyfile 的 header 块
  *
  * 支持 `Name "value"` 与删除指令 `-Name`。
@@ -342,6 +391,7 @@ const PARSERS = {
   vercel: parseVercelHeaders,
   nginx: parseNginxHeaders,
   caddy: parseCaddyHeaders,
+  htaccess: parseApacheHeaders,
 };
 
 /**

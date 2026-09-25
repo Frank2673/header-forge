@@ -29,7 +29,7 @@
 | 环节 | 做法 | 产物 |
 |---|---|---|
 | **声明** | 策略即代码，带严重度与理由 | `headers.policy.json` |
-| **落地** | 生成 5 种平台的原生配置 | `_headers` / `vercel.json` / nginx / caddy |
+| **落地** | 生成 6 种平台的原生配置 | `_headers` / `vercel.json` / nginx / caddy / `.htaccess` |
 | **验证** | 线上一致性校验 + 本地模拟自证 | 一致性报告 / CI 门禁 |
 
 ## 最值得说的一点：本地可证
@@ -78,12 +78,31 @@ node src/index.mjs advise --html path/to/index.html
 | **Vercel** | `vercel.json` | 同时输出可合并的片段，避免覆盖已有配置 |
 | **Nginx** | `add_header` 指令 | 提示 `add_header` 的继承陷阱；值做转义防配置注入 |
 | **Caddy** | `Caddyfile` 片段 | 支持 `-HeaderName` 直接删除响应头 |
+| **Apache** | `.htaccess` | `mod_headers` + `<IfModule>` 守卫；前置条件（`AllowOverride FileInfo`）写在产物注释与下方局限里 |
 
 > GitHub Pages 不在此列 —— 因为它**不支持**自定义响应头。迁移路径见 [MIGRATION.md](MIGRATION.md)。
 
+### Apache `.htaccess`：两个默认取舍
+
+它是唯一一个**文件级**产物，所以比别人多了两个"不生效是无声的"风险点，两处的默认选择与理由：
+
+| 取舍 | 默认 | 理由 |
+|---|---|---|
+| `Header always set` vs `Header set` | **`always set`** | `Header set` 只作用于成功响应（2xx），404/500 错误页会丢掉全部防护 —— 而错误页同样是浏览器会渲染的 HTML，可以被打框架、被嗅探。代价：也会作用于 3xx/4xx/5xx；若应用自己设置同名头，需保持取值一致 |
+| 是否用 `<IfModule mod_headers.c>` 守卫 | **加守卫** | mod_headers 未加载时，没有守卫会让整个目录 **500**（.htaccess 的未知指令是致命错误），有守卫则退化为静默不生效。选可用性优先 —— 代价是失败无声，所以部署后**必须**用 `verify` 复验 |
+
+```bash
+# 产物落在发布目录根下（.htaccess 必须与 index.html 同级才对整个站点生效）
+node src/index.mjs generate --policy headers.policy.json --out dist --only htaccess
+node src/index.mjs simulate --config dist/.htaccess --policy headers.policy.json
+
+# 反向导入：接管已有的 .htaccess（手写文件也认 —— Header set/unset、onsuccess、单引号都支持）
+node src/index.mjs import --from /var/www/html/.htaccess --out headers.policy.json --force
+```
+
 ## 反向导入：接管一个已经有响应头配置的项目
 
-不用从零重写策略。手上已经有一份 `_headers` / `vercel.json` / nginx 片段 / Caddyfile 时：
+不用从零重写策略。手上已经有一份 `_headers` / `vercel.json` / nginx 片段 / Caddyfile / Apache `.htaccess` 时：
 
 ```bash
 $ node src/index.mjs import --from public/_headers
@@ -166,6 +185,7 @@ $ npm run roundtrip
 ✅ vercel             vercel   7/7 个头部往返一致
 ✅ nginx              nginx    7/7 个头部往返一致
 ✅ caddy              caddy    7/7 个头部往返一致
+✅ htaccess           htaccess 7/7 个头部往返一致
 ```
 
 CI 每次都会跑它 —— 生成器或解析器任何一侧改坏转义，都会当场红。
@@ -276,6 +296,7 @@ jobs:
 | **零依赖** | 只用 Node 内置模块（`crypto`/`https`/`http`），CI 里无需 `npm install`，供应链面为零 |
 | **拒绝 `unsafe-inline`（script-src）** | 策略校验会直接拒绝它；确需放行必须改用 hash 或在 `why` 中明确说明 |
 | **配置注入防护** | 策略值会被渲染进 nginx/caddy 语法，含换行/制表符的值一律拒绝（否则一个换行就能注入任意指令） |
+| **`.htaccess` 默认 `always set` + `<IfModule>` 守卫** | 错误响应也要有防护（`Header set` 只覆盖 2xx）；缺 mod_headers 时没守卫会让整站 500。代价是"不生效不报错"，所以要求部署后用 `verify` 复验 |
 | **校验允许"更强"** | HSTS 的 max-age 更大、CSP 有额外指令都算通过 —— 否则工具天天误报，最后没人看 |
 | **模拟器解析真实产物** | 只验证策略对象是自欺欺人；必须验证"生成出来的东西" |
 | **校验响应完整性** | 沿用 surface-watch 的教训：被中断的残缺响应必须判为失败，否则会得出"头部缺失"的错误结论 |
@@ -286,6 +307,9 @@ jobs:
 - `verify` 校验的是「单个 URL 的响应头」；若站点按路径设置不同头，需要对每个路径分别校验
 - 反向导入**只能恢复"名字与取值"**：`severity`/`why` 是人的判断，配置里没有；策略模型一个头只有一个取值，多路径块或多条 `source` 规则会被合并（合并时给出警告）
 - nginx 的 `location` 嵌套、Caddy 的匹配器等结构信息在策略模型里表达不了，导入时只反映"文件里写了哪些头"
+- Apache `.htaccess` 是**文件级**配置，多两个静默失效点：需要站点已加载 `mod_headers`，且允许覆盖（主配置 `AllowOverride FileInfo` —— `Header` 指令的 Override 类别），否则整块配置不生效、通常也不报错。模拟器能证明"产物里的取值与结构正确"，但**验证不了你的 Apache 是否真的加载了模块、是否允许覆盖** —— 部署后请用 `verify` 对线上实测
+- `.htaccess` 没有路径模式：它整块作用于所在目录及其子目录。要按路径设置不同的头，得把产物分别放进对应目录（每目录一份），策略模型里"一个头一个取值"表达不了这种差异
+- `Header always unset Server` 在部分配置下不生效（`Server` 由 core 生成），更可靠的是主配置里的 `ServerTokens` / `ServerSignature` —— 那属于主配置，本工具生成不了
 - CSP 顾问基于静态 HTML 分析：运行时才加载的脚本、动态创建的 iframe 等无法预知，仍建议先上 Report-Only
 - 不处理 DNS 层面的问题（如 DMARC 记录）—— 那是 surface-watch 的领域，且需要自有域名
 
@@ -295,7 +319,7 @@ jobs:
 - [ ] 支持 Cloudflare Transform Rules API 直接下发（省去手工粘贴）
 - [ ] 增加 `--paths` 批量校验多个 URL
 - [ ] 输出 SARIF，接入 GitHub Code Scanning
-- [ ] 增加 Apache `.htaccess` 生成器（含反向导入）
+- [x] 增加 Apache `.htaccess` 生成器（含反向导入）
 
 ## 许可
 

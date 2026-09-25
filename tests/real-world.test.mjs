@@ -209,7 +209,7 @@ test('无论生成器顺序如何，落点都不会被两个平台共用', () =>
   for (const order of [forward, reversed]) {
     const targets = planOutputPaths('dist', order).map((p) => p.target);
     assert.equal(new Set(targets).size, targets.length, `落点有重复：${targets.join(', ')}`);
-    assert.equal(targets.length, 5);
+    assert.equal(targets.length, 6);
   }
 });
 
