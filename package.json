@@ -1,7 +1,7 @@
 {
   "name": "header-forge",
   "version": "0.1.0",
-  "description": "安全响应头配置即代码 —— 一次声明，多平台生成，线上校验，本地可证",
+  "description": "Security response headers as code — declare once, generate native config for 6 platforms, verify the live response, and prove it locally with a built-in simulator.",
   "type": "module",
   "private": true,
   "engines": {
@@ -10,6 +10,16 @@
   "bin": {
     "header-forge": "src/index.mjs"
   },
+  "files": [
+    "src/",
+    "docs/",
+    "fixtures/",
+    "scripts/check-roundtrip.mjs",
+    "headers.policy.json",
+    "MIGRATION.md",
+    "README.md",
+    "README.en.md"
+  ],
   "scripts": {
     "generate": "node src/index.mjs generate --policy headers.policy.json --out dist",
     "import": "node src/index.mjs import",
@@ -21,13 +31,35 @@
   },
   "keywords": [
     "security-headers",
+    "http-security-headers",
     "csp",
+    "content-security-policy",
+    "hsts",
+    "permissions-policy",
     "configuration-as-code",
+    "policy-as-code",
     "cloudflare-pages",
     "netlify",
-    "nginx"
+    "vercel",
+    "nginx",
+    "caddy",
+    "apache",
+    "htaccess",
+    "devsecops",
+    "zero-dependency",
+    "cli",
+    "nodejs"
   ],
   "license": "MIT",
+  "author": "Frank2673 <253210312+Frank2673@users.noreply.github.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Frank2673/header-forge.git"
+  },
+  "homepage": "https://github.com/Frank2673/header-forge#readme",
+  "bugs": {
+    "url": "https://github.com/Frank2673/header-forge/issues"
+  },
   "dependencies": {},
   "devDependencies": {}
 }

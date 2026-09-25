@@ -1,5 +1,7 @@
 # header-forge
 
+[English](README.en.md) | 简体中文
+
 [![CI](https://github.com/Frank2673/header-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/Frank2673/header-forge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![零依赖](https://img.shields.io/badge/运行时依赖-0-brightgreen)
