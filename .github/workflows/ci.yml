@@ -101,7 +101,7 @@ jobs:
           echo "✅ 漂移检测正确发现了改动"
 
       - name: 上传生成的配置
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: header-configs
           path: dist/
